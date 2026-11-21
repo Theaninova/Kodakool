@@ -323,8 +323,20 @@ export function smartSelect(o: SmartOptions) {
     } catch {
       return false;
     }
+    // a mark decoration puts the label CHIPS inside the range; their rects would
+    // otherwise form a row above the text and swallow the pointer's hit test.
+    // Same selector the click guards use — widgets never carry text geometry.
+    const widgetRects: DOMRect[] = [];
+    for (const el of view.dom.querySelectorAll(".cm-tag,.cm-tagline,.cm-widget"))
+      widgetRects.push(el.getBoundingClientRect());
     const rects = Array.from(range.getClientRects())
       .filter((r) => r.height > 0)
+      .filter(
+        (r) =>
+          !widgetRects.some(
+            (t) => r.left >= t.left - 1 && r.right <= t.right + 1 && r.top >= t.top - 1 && r.bottom <= t.bottom + 1,
+          ),
+      )
       .sort((a, z) => a.top - z.top);
     if (rects.length === 0) return false;
     const rows: { l: number; r: number; t: number; b: number }[] = [];

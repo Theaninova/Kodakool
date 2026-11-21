@@ -314,6 +314,44 @@ describe("article coding page", () => {
     expect(codes.find((c) => c.device === DEVICE_COMMENT)?.excerpt).toBe("Ein Zitat im Text");
   });
 
+  it("keeps a coded line clickable: the label chip never becomes a nearBox row", async () => {
+    const id = await seedArticle({ project: FOLDER, name: NAME, text: "Kurzer Satz.\nZweite Zeile.", entries: [] });
+
+    renderArticle();
+    await ready();
+
+    // first code: the whole first line is one sentence → the click codes it all
+    // and its label chip rides at the line start
+    await page.getByRole("treeitem", { name: "Kommentar" }).click();
+    await editor().click({ position: { x: 5, y: 30 } });
+    await expect.poll(() => treeCount("Kommentar")).toBe("1");
+    await expect.poll(chips).toEqual(["K"]);
+
+    // second device, same line: the click's DOM range starts at the line head,
+    // where the chip sits — the regression was nearBox counting the chip's rect
+    // as a text row, so this pointer position (inside the chip's band, far right
+    // of the chip) fell into an 18px-wide row and the click was silently discarded
+    await page.getByRole("treeitem", { name: "Zitat" }).click();
+    const content = document.querySelector(".cm-content") as HTMLElement;
+    const chip = document.querySelector(".cm-tag")!.getBoundingClientRect();
+    content.dispatchEvent(
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: chip.left + 60,
+        clientY: (chip.top + chip.bottom) / 2,
+        buttons: 0,
+      }),
+    );
+    // accepted at that pointer position = the hover preview pair shows up
+    // (sentence + word overlay); rejected, nearBox reports nothing → zero
+    await expect.poll(() => document.querySelectorAll(".cm-underline").length).toBe(2);
+
+    // a hover never codes: after the room's persist settles, the store holds only K
+    await expect.poll(async () => (await readCodes(id)).length, { timeout: 5000 }).toBe(1);
+  });
+
   it("previews the click span and the drag word as two overlays on hover", async () => {
     await seedArticle({ project: FOLDER, name: NAME, text: TEXT, entries: [] });
 
