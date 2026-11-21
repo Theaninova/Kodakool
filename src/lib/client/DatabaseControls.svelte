@@ -16,7 +16,29 @@
   let fileInput: HTMLInputElement | undefined = $state(undefined);
 
   /** union by id, imported rows win — the merge-import contract the app always had */
-  function mergeBlobs(current: StoreBlob, incoming: StoreBlob): StoreBlob {
+  function mergeBlobs(current: StoreBlob, incomingIn: StoreBlob): StoreBlob {
+    // A backup from another browser/profile carries its own UUID for the same local
+    // user; merging both user rows violates UNIQUE(users.email) and the server rolls
+    // the whole import back. Identity resolution: an incoming user whose email
+    // matches an existing one adopts that id, and every reference to the old one
+    // (project owners, members) is rewritten before merging.
+    let incoming = incomingIn;
+    const idByEmail = new Map<string, string>();
+    for (const u of current.users) if (u.email) idByEmail.set(u.email, u.id);
+    const remap = new Map<string, string>();
+    for (const u of incoming.users) {
+      const existing = u.email ? idByEmail.get(u.email) : undefined;
+      if (existing && existing !== u.id) remap.set(u.id, existing);
+    }
+    if (remap.size > 0) {
+      const uid = (id: string) => remap.get(id) ?? id;
+      incoming = {
+        ...incoming,
+        users: incoming.users.map((u) => ({ ...u, id: uid(u.id) })),
+        projects: incoming.projects.map((p) => (p.owner === undefined ? p : { ...p, owner: uid(p.owner) })),
+        members: incoming.members.map((m) => ({ ...m, user_id: uid(m.user_id) })),
+      };
+    }
     const byId = <T extends { id?: string; project_id?: string; doc_id?: string; key?: string }>(
       a: T[],
       b: T[],
@@ -27,7 +49,7 @@
       for (const x of b) map.set(key(x), x);
       return [...map.values()];
     };
-    return {
+    const merged: StoreBlob = {
       version: 1,
       users: byId(current.users, incoming.users, (x) => x.id),
       projects: byId(current.projects, incoming.projects, (x) => x.id),
@@ -38,8 +60,21 @@
       states: byId(current.states, incoming.states, (x) => x.doc_id),
       meta: byId(current.meta, incoming.meta, (x) => x.key),
     };
+    // a document sitting in a subfolder implies that subfolder: older backups carry the
+    // folder path only on the documents (moves never registered the path), and the tree
+    // expands registered subs — without this the restored documents would stay hidden.
+    for (const p of merged.projects) {
+      const paths = new Set<string>();
+      try {
+        for (const s of JSON.parse(p.subs ?? "[]") as unknown[]) if (typeof s === "string") paths.add(s);
+      } catch {
+        /* unparseable subs column: rebuild it from the documents */
+      }
+      for (const d of merged.documents) if (d.project_id === p.id && d.folder) paths.add(d.folder);
+      p.subs = JSON.stringify([...paths].sort());
+    }
+    return merged;
   }
-
   async function exportDb() {
     msg = "";
     try {

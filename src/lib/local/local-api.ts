@@ -416,16 +416,19 @@ export async function exportDatabase(): Promise<unknown> {
 /** the worker server's export blob shape (server/src/app.ts is the source) */
 export interface StoreBlob {
   version: number;
-  users: { id: string }[];
-  projects: { id: string; name: string }[];
+  users: { id: string; email?: string | null; name?: string; created?: number }[];
+  projects: { id: string; owner?: string; name: string; subs?: string; created?: number }[];
   members: { project_id: string; user_id: string }[];
   documents: {
     id: string;
     project_id: string;
     name: string;
     folder?: string;
+    kind?: string;
+    text?: string;
     codes?: string;
     versions?: string;
+    updated?: number;
   }[];
   catalogs: { project_id: string; data: string }[];
   pdfs: { doc_id: string }[];

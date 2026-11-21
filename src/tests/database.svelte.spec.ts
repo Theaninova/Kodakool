@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { render } from "vitest-browser-svelte";
+import ColorProvider from "./ColorProvider.svelte";
+import DatabaseControls from "$lib/client/DatabaseControls.svelte";
 import {
   createFolder,
   exportDatabase,
@@ -13,7 +16,7 @@ import {
   savePdfData,
   type StoreBlob,
 } from "$lib/local/local-api";
-import { DEVICE_QUOTE, resetArticles, seedArticle, testInstructions } from "./fixtures";
+import { DEVICE_QUOTE, resetArticles, seedArticle, testInstructions, uploadTo } from "./fixtures";
 import type { CodeEntry } from "$lib/coding/types";
 
 const FOLDER = "test";
@@ -122,5 +125,63 @@ describe("database export/import", () => {
       /unsupported import version/,
     );
     await expect(importDatabase(null)).rejects.toThrow(/import blob must be an object/);
+  });
+
+  it("merges a backup from another profile whose local user has a different UUID", async () => {
+    await seedArticle({ project: FOLDER, name: NAME, text: TEXT });
+    render(DatabaseControls, {}, { wrapper: ColorProvider });
+
+    // A foreign profile's backup: the same local user email under a fresh user UUID, plus a
+    // project+document this store has never seen. Both user rows would collide on
+    // UNIQUE(users.email) — the server rolled the import back and NOTHING was loaded.
+    const own = (await exportDatabase()) as StoreBlob;
+    const ownId = own.users[0].id;
+    const foreign = JSON.parse(JSON.stringify(own)) as StoreBlob;
+    const foreignId = crypto.randomUUID();
+    foreign.users[0].id = foreignId;
+    for (const p of foreign.projects) if (p.owner === ownId) p.owner = foreignId;
+    const newPid = crypto.randomUUID();
+    foreign.projects.push({ id: newPid, owner: foreignId, name: "restored", created: Date.now() });
+    foreign.documents.push({
+      id: crypto.randomUUID(),
+      project_id: newPid,
+      name: "restored doc",
+      folder: "",
+      kind: "text",
+      text: TEXT,
+      codes: "[]",
+      versions: "[]",
+      updated: Date.now(),
+    });
+    // a document inside a subfolder the blob's project row never registered
+    foreign.documents.push({
+      id: crypto.randomUUID(),
+      project_id: newPid,
+      name: "nested doc",
+      folder: "notes",
+      kind: "text",
+      text: TEXT,
+      codes: "[]",
+      versions: "[]",
+      updated: Date.now(),
+    });
+
+    uploadTo(".dbfile", new File([JSON.stringify(foreign)], "kodakool-db.json", { type: "application/json" }));
+    await expect
+      .poll(() => document.querySelector(".dbmsg")?.textContent, { timeout: 8000 })
+      .toMatch(/imported \d+ documents/);
+
+    // the imported data is live AND this store's own data survived the merge
+    expect(await getArticle("restored", "restored doc")).toBeTruthy();
+    expect(await getArticle("restored", "nested doc")).toBeTruthy();
+    expect(await getArticle(FOLDER, NAME)).toBeTruthy();
+    expect((await listFolders()).sort()).toEqual(["restored", FOLDER]);
+
+    // one user row per email, the foreign references adopted the existing user's id,
+    // and the unregistered subfolder of the nested document was registered by the merge
+    const after = (await exportDatabase()) as StoreBlob;
+    expect(after.users.filter((u) => u.email === own.users[0].email)).toHaveLength(1);
+    expect(after.projects.find((p) => p.name === "restored")?.owner).toBe(ownId);
+    expect(JSON.parse(after.projects.find((p) => p.name === "restored")?.subs ?? "[]")).toContain("notes");
   });
 });
