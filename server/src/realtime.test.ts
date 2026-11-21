@@ -98,6 +98,31 @@ describe("room relay", () => {
     expect(a.sent.length).toBe(0); // the origin is not echoed
   });
 
+  it("reaps a connection whose send fails and keeps relaying + persisting", () => {
+    // a Firefox worker-scope broadcast used to throw DataCloneError (detached ArrayBuffer)
+    // on the SECOND recipient of one shared message — that aborted the fanout, starving
+    // the healthy tabs AND skipping the room's persist, so counts/export froze silently.
+    const db = openMemoryDb();
+    seedDoc(db, "doc1");
+    const room = new Room("doc1", db);
+    const a = new FakeConn();
+    const sick = new FakeConn();
+    const b = new FakeConn();
+    room.attach(a);
+    room.attach(sick);
+    room.attach(b);
+    sick.send = () => {
+      throw new Error("DataCloneError: attempting to access detached ArrayBuffer");
+    };
+    a.sent.length = 0;
+    sick.sent.length = 0;
+    b.sent.length = 0;
+    room.doc.transact(() => room.doc.getText("text").insert(0, "after"), a);
+    expect(b.sent.length).toBe(1); // the healthy member still got the update
+    expect(room.conns.has(sick)).toBe(false); // the failing conn was reaped
+    expect(db.prepare("SELECT state FROM doc_states WHERE doc_id = 'doc1'").get()).toBeDefined(); // persist ran
+  });
+
   it("relays awareness and clears it on disconnect", () => {
     const db = openMemoryDb();
     seedDoc(db, "doc1");

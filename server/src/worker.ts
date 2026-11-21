@@ -42,6 +42,9 @@ class PortConn {
   constructor(port: MessagePort) {
     this.port = port;
     port.onmessage = (ev: MessageEvent) => this.cbs.message?.(new Uint8Array(ev.data as ArrayBuffer));
+    // shortcut: Firefox NEVER fires "close" for a port whose page died — a dead
+    // conn stays rs:1 and silently drops sends forever; the room reaps conns
+    // whose send throws. Upgrade when the zombie accumulation starts to bite.
     port.addEventListener("close", () => {
       this.readyState = 2;
       this.cbs.close?.();
@@ -49,7 +52,11 @@ class PortConn {
   }
 
   send(data: Uint8Array): void {
-    if (this.readyState === 1) this.port.postMessage(data, [data.buffer]);
+    // NO transfer list here: the room broadcasts the SAME encoded message to every
+    // conn, and transferring detaches its buffer after the first send — the next
+    // recipient then gets DataCloneError (detached ArrayBuffer), which starves that
+    // tab and, pre-try/catch, skipped the room's persist. Cloning costs bytes.
+    if (this.readyState === 1) this.port.postMessage(data);
   }
 
   on(event: "message", cb: (data: Uint8Array) => void): void;

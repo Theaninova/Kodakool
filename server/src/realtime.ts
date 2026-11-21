@@ -67,7 +67,7 @@ export class Room {
         encoding.writeVarUint(enc, MSG_SYNC);
         syncProtocol.writeUpdate(enc, update);
       });
-      for (const conn of this.conns) if (conn !== origin) send(conn, message);
+      this.deliver(message, origin as RoomConn | undefined);
       this.schedulePersist();
     });
     this.awareness.on(
@@ -78,9 +78,24 @@ export class Room {
           encoding.writeVarUint(enc, MSG_AWARENESS);
           encoding.writeVarUint8Array(enc, awarenessProtocol.encodeAwarenessUpdate(this.awareness, changed));
         });
-        for (const conn of this.conns) send(conn, message);
+        this.deliver(message);
       },
     );
+  }
+
+  /** fan one message out to every conn (except `except`); a conn whose send throws
+   *  (dead port / half-closed socket) is reaped, never allowed to abort the fanout */
+  private deliver(message: Uint8Array, except?: RoomConn): void {
+    const dead: RoomConn[] = [];
+    for (const conn of this.conns) {
+      if (conn === except) continue;
+      try {
+        send(conn, message);
+      } catch {
+        dead.push(conn);
+      }
+    }
+    for (const conn of dead) this.detach(conn);
   }
 
   /** load the persisted state (called once at room creation) */
