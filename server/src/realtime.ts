@@ -31,6 +31,8 @@ export interface RoomConn {
   send(data: Uint8Array): void;
   on(event: "message", cb: (data: Uint8Array) => void): void;
   on(event: "close" | "error", cb: () => void): void;
+  /** tear the transport down (a closed room disconnects its members; ws + MessagePort both have one) */
+  close?(): void;
 }
 
 const send = (conn: RoomConn, message: Uint8Array): void => {
@@ -55,6 +57,9 @@ export class Room {
   readonly conns = new Set<RoomConn>();
   private readonly connIds = new Map<RoomConn, Set<number>>();
   private persistTimer: ReturnType<typeof setTimeout> | undefined;
+  /** exactly the bytes of the last doc_states write, for staleness checks after a store replacement */
+  private lastPersisted: Uint8Array | undefined;
+  private closed = false;
   private readonly db: Db;
   readonly name: string;
 
@@ -109,7 +114,15 @@ export class Room {
       } catch (e) {
         console.warn("realtime: corrupt persisted state, starting empty:", e instanceof Error ? e.message : String(e));
       }
+      return;
     }
+    // no persisted state: the room is new to the store — adopt the REST row's text HERE, in
+    // the single-writer server. Clients used to seed it, and two tabs that both observed an
+    // empty room at their synced moment inserted the snapshot text twice (issue #10). Entry
+    // seeds stay client-side: their content-derived map keys dedupe the race harmlessly.
+    const doc = this.db.prepare("SELECT text FROM documents WHERE id = ?").get(this.name) as
+      { text: string } | undefined;
+    if (doc && doc.text !== "") this.doc.getText("text").insert(0, doc.text);
   }
 
   attach(conn: RoomConn): void {
@@ -155,6 +168,7 @@ export class Room {
   }
 
   private onMessage(conn: RoomConn, data: Uint8Array): void {
+    if (this.closed) return;
     const decoder = decoding.createDecoder(data);
     while (decoding.hasContent(decoder)) {
       switch (decoding.readVarUint(decoder)) {
@@ -188,12 +202,45 @@ export class Room {
       clearTimeout(this.persistTimer);
       this.persistTimer = undefined;
     }
+    if (this.closed) return;
+    // the document was deleted (cascade) while a transport was still attached: a dead room
+    // must never resurrect its doc_states row — detach-persist used to re-create it (#9).
+    if (!this.db.prepare("SELECT 1 FROM documents WHERE id = ?").get(this.name)) return;
+    this.lastPersisted = Y.encodeStateAsUpdate(this.doc);
     this.db
       .prepare(
         "INSERT INTO doc_states (doc_id, state, updated) VALUES (?, ?, ?) ON CONFLICT(doc_id) DO UPDATE SET state = excluded.state, updated = excluded.updated",
       )
-      .run(this.name, Y.encodeStateAsUpdate(this.doc), Date.now());
+      .run(this.name, this.lastPersisted, Date.now());
     materialize(this.db, this.name, this.doc);
+  }
+
+  /**
+   * Retire this room for good: no further writes, members disconnected. RoomManager.room()
+   * will build a fresh one (reloading doc_states from the store) for the next attach.
+   */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.persistTimer !== undefined) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    for (const conn of this.conns) {
+      try {
+        conn.close?.();
+      } catch {
+        /* transport already gone */
+      }
+    }
+    this.conns.clear();
+    this.connIds.clear();
+    this.doc.destroy();
+  }
+
+  /** true when `bytes` is exactly what this room last wrote to doc_states (import staleness check) */
+  persistedMatches(bytes: Uint8Array | undefined): boolean {
+    return bytesEqual(this.lastPersisted, bytes);
   }
 }
 
@@ -250,4 +297,40 @@ export class RoomManager {
     }
     return room;
   }
+
+  /** retire the room of a deleted document (its next write would re-create the row it deleted) */
+  close(docId: string): void {
+    const room = this.rooms.get(docId);
+    if (!room) return;
+    room.close();
+    this.rooms.delete(docId);
+  }
+
+  /**
+   * After a whole-store replacement (POST /api/import), warm rooms whose last write does not
+   * match what the store now holds are stale: their next materialize would overwrite the
+   * imported rows with pre-replacement content (issue #9). Drop them so room() reloads from
+   * the store. Rooms that merely round-trip the same bytes (the app's merge-import re-writes
+   * identical rows) stay warm, so open documents keep collaborating.
+   * shortcut: staleness is the doc_states BYTES, so a hand-edited blob that rewrites
+   * documents.text without fixing its `states` entry still goes unnoticed by this check;
+   * upgrade to a text/codes comparison if anyone ever ships blob editing.
+   */
+  closeStale(): void {
+    for (const [id, room] of [...this.rooms]) {
+      const row = this.db.prepare("SELECT state FROM doc_states WHERE doc_id = ?").get(id) as
+        { state: Uint8Array } | undefined;
+      const stored = row ? new Uint8Array(row.state) : undefined;
+      if (!room.persistedMatches(stored)) {
+        room.close();
+        this.rooms.delete(id);
+      }
+    }
+  }
+}
+
+function bytesEqual(a?: Uint8Array, b?: Uint8Array): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

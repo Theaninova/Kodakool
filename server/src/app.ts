@@ -30,6 +30,9 @@ export interface AppDeps {
   db: Db;
   /** environment crypto: nodeCrypto on the server, webCrypto in the worker */
   kdf: Crypto;
+  /** the process's room manager, when realtime rooms run beside this app (main.ts / worker.ts):
+   *  routes must retire the rooms of deleted documents and drop rooms made stale by an import */
+  rooms?: { close(docId: string): void; closeStale(): void };
 }
 
 const MAX_VERSIONS = 200;
@@ -39,7 +42,7 @@ const MAX_VERSIONS = 200;
  * refresh rotation. Data: projects (owner + shared members), documents, catalogs, versions.
  * Real-time document rooms live in realtime.ts (WebSocket upgrade on /api/realtime/:docId).
  */
-export function createApp({ cfg, db, kdf }: AppDeps): Hono {
+export function createApp({ cfg, db, kdf, rooms }: AppDeps): Hono {
   const app = new Hono();
   const me = (c: Context): UserRow => c.get("user") as UserRow;
 
@@ -254,6 +257,8 @@ export function createApp({ cfg, db, kdf }: AppDeps): Hono {
     if (!p) return c.json({ error: "not found" }, 404);
     if (p.owner !== u.id) return c.json({ error: "only the owner can delete a project" }, 403);
     // cascade order matters: the doc_id subqueries need the documents still present
+    for (const row of db.prepare("SELECT id FROM documents WHERE project_id = ?").all(p.id) as { id: string }[])
+      rooms?.close(row.id); // retire every warm room before the cascade (#9)
     db.prepare("DELETE FROM pdfs WHERE doc_id IN (SELECT id FROM documents WHERE project_id = ?)").run(p.id);
     db.prepare("DELETE FROM doc_states WHERE doc_id IN (SELECT id FROM documents WHERE project_id = ?)").run(p.id);
     db.prepare("DELETE FROM documents WHERE project_id = ?").run(p.id);
@@ -428,6 +433,7 @@ export function createApp({ cfg, db, kdf }: AppDeps): Hono {
       for (const m of blob.meta) db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run(m.key, m.value);
       db.exec("COMMIT");
       storeEvents.emit({ kind: "project" });
+      rooms?.closeStale(); // warm rooms built pre-import would materialize stale content over the new rows (#9)
     } catch (e) {
       db.exec("ROLLBACK");
       return c.json({ error: `import failed: ${e instanceof Error ? e.message : String(e)}` }, 400);
@@ -513,6 +519,7 @@ export function createApp({ cfg, db, kdf }: AppDeps): Hono {
     const u = me(c);
     const d = docAccess(db, c.req.param("id"), u.id);
     if (!d) return c.json({ error: "not found" }, 404);
+    rooms?.close(d.id); // retire the warm room too: its detach-persist would resurrect the deleted doc_states row (#9)
     db.prepare("DELETE FROM documents WHERE id = ?").run(d.id);
     db.prepare("DELETE FROM doc_states WHERE doc_id = ?").run(d.id);
     db.prepare("DELETE FROM pdfs WHERE doc_id = ?").run(d.id);
@@ -522,10 +529,13 @@ export function createApp({ cfg, db, kdf }: AppDeps): Hono {
 
   app.post("/api/docs/:id/versions", async (c) => {
     const u = me(c);
-    const d = docAccess(db, c.req.param("id"), u.id);
-    if (!d) return c.json({ error: "not found" }, 404);
     const body = versionBody.safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json({ error: "invalid body" }, 400);
+    // the read-modify-write of the whole versions JSON must stay SYNCHRONOUS: reading the row
+    // before `await c.req.json()` let a concurrent snapshot/label write overwrite this one's
+    // row — snapshots and labels vanished with no error (issue #8). No await between read+write.
+    const d = docAccess(db, c.req.param("id"), u.id);
+    if (!d) return c.json({ error: "not found" }, 404);
     const versions = parseJson<VersionRow[]>(d.versions, []);
     versions.push({
       id: crypto.randomUUID(),
@@ -546,10 +556,11 @@ export function createApp({ cfg, db, kdf }: AppDeps): Hono {
 
   app.put("/api/docs/:id/versions/:vid/label", async (c) => {
     const u = me(c);
-    const d = docAccess(db, c.req.param("id"), u.id);
-    if (!d) return c.json({ error: "not found" }, 404);
     const body = labelBody.safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json({ error: "invalid body" }, 400);
+    // read AFTER the await, then mutate + write synchronously — same atomicity rule as POST /versions above
+    const d = docAccess(db, c.req.param("id"), u.id);
+    if (!d) return c.json({ error: "not found" }, 404);
     const versions = parseJson<{ id: string; label?: string }[]>(d.versions, []);
     const v = versions.find((x) => x.id === c.req.param("vid"));
     if (!v) return c.json({ error: "version not found" }, 404);

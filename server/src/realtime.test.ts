@@ -5,7 +5,7 @@ import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import * as syncProtocol from "y-protocols/sync";
 import * as awarenessProtocol from "y-protocols/awareness";
-import { materialize, Room } from "./realtime.ts";
+import { materialize, Room, RoomManager } from "./realtime.ts";
 import { openMemoryDb } from "./db-node.ts";
 
 /** minimal WebSocket stand-in: readyState + send + the events Room subscribes to */
@@ -168,5 +168,92 @@ describe("room relay", () => {
     room2.load();
     expect(room2.doc.getText("text").toString()).toBe("persisted");
     expect(room2.doc.getMap("entries").size).toBe(1);
+  });
+
+  it("seeds a fresh room's text from the REST row exactly once (issue #10)", () => {
+    const db = openMemoryDb();
+    seedDoc(db, "doc1");
+    db.prepare("UPDATE documents SET text = ? WHERE id = ?").run("Hello world.", "doc1");
+
+    // no doc_states row yet: the room adopts the REST text at creation (server, single writer)
+    const room = new Room("doc1", db);
+    room.load();
+    expect(room.doc.getText("text").toString()).toBe("Hello world.");
+
+    // two clients opening it at once both sync WITH the seeded text — neither sees an
+    // empty room, so neither can seed a second copy
+    const docs = [new Y.Doc(), new Y.Doc()];
+    for (let i = 0; i < 2; i++) {
+      const conn = new FakeConn();
+      room.attach(conn);
+      conn.emit(
+        "message",
+        Buffer.from(
+          encoding.encode((enc) => {
+            encoding.writeVarUint(enc, 0);
+            syncProtocol.writeSyncStep1(enc, docs[i]);
+          }),
+        ),
+      );
+      const reply = conn.sent.at(-1)!;
+      const dec = decoding.createDecoder(reply);
+      decoding.readVarUint(dec);
+      expect(decoding.readVarUint(dec)).toBe(syncProtocol.messageYjsSyncStep2);
+      Y.applyUpdate(docs[i], decoding.readVarUint8Array(dec));
+    }
+    expect(room.doc.getText("text").toString()).toBe("Hello world.");
+    expect(docs[0].getText("text").toString()).toBe("Hello world.");
+    expect(docs[1].getText("text").toString()).toBe("Hello world.");
+  });
+
+  it("a closed room writes nothing: deletes do not resurrect doc_states (issue #9)", () => {
+    const db = openMemoryDb();
+    seedDoc(db, "doc1");
+    const rooms = new RoomManager(db);
+    const room = rooms.room("doc1");
+    const a = new FakeConn();
+    room.attach(a);
+    room.doc.transact(() => room.doc.getText("text").insert(0, "warm"), a);
+    room.persist();
+    expect(db.prepare("SELECT state FROM doc_states WHERE doc_id = 'doc1'").get()).toBeDefined();
+
+    // the delete route retires the room, then cascades the rows
+    rooms.close("doc1");
+    db.prepare("DELETE FROM doc_states WHERE doc_id = 'doc1'").run();
+    db.prepare("DELETE FROM documents WHERE id = 'doc1'").run();
+
+    // the transport notices late: detach -> persist must write nothing
+    a.emit("close");
+    expect(db.prepare("SELECT state FROM doc_states WHERE doc_id = 'doc1'").get()).toBeUndefined();
+    // and a frame racing the close is ignored, not applied to a zombie room
+    a.emit("message", Buffer.from(new Uint8Array([0])));
+    expect(db.prepare("SELECT state FROM doc_states WHERE doc_id = 'doc1'").get()).toBeUndefined();
+  });
+
+  it("closeStale keeps byte-identical warm rooms but drops replaced ones (issue #9)", () => {
+    const db = openMemoryDb();
+    seedDoc(db, "doc1");
+    const rooms = new RoomManager(db);
+    const room = rooms.room("doc1");
+    const a = new FakeConn();
+    room.attach(a);
+    room.doc.transact(() => room.doc.getText("text").insert(0, "notes"), a);
+    room.persist();
+
+    // an import that rewrites identical bytes (the app's merge-import) must NOT evict:
+    // open documents keep collaborating
+    const row = db.prepare("SELECT state FROM doc_states WHERE doc_id = 'doc1'").get() as {
+      state: Uint8Array;
+    };
+    rooms.closeStale();
+    expect(rooms.room("doc1")).toBe(room);
+
+    // an import that replaced the state: the warm room goes, the next one reloads from disk
+    const replacement = new Y.Doc();
+    replacement.getText("text").insert(0, "imported");
+    db.prepare("UPDATE doc_states SET state = ? WHERE doc_id = 'doc1'").run(Y.encodeStateAsUpdate(replacement));
+    rooms.closeStale();
+    expect(rooms.room("doc1")).not.toBe(room);
+    expect(rooms.room("doc1").doc.getText("text").toString()).toBe("imported");
   });
 });

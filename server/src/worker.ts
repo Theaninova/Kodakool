@@ -20,7 +20,7 @@
  */
 import { createApp } from "./app.ts";
 import { webCrypto } from "./auth-web.ts";
-import { openSqlJsDb } from "./sqljs.ts";
+import { openSqlJsDb, flushNow } from "./sqljs.ts";
 import { RoomManager } from "./realtime.ts";
 import { storeEvents } from "./events.ts";
 import { issueSession, verifyAccessToken } from "./auth.ts";
@@ -57,6 +57,12 @@ class PortConn {
     // recipient then gets DataCloneError (detached ArrayBuffer), which starves that
     // tab and, pre-try/catch, skipped the room's persist. Cloning costs bytes.
     if (this.readyState === 1) this.port.postMessage(data);
+  }
+
+  close(): void {
+    if (this.readyState === 2) return;
+    this.readyState = 2;
+    this.port.close();
   }
 
   on(event: "message", cb: (data: Uint8Array) => void): void;
@@ -114,7 +120,13 @@ function loadSecret(db: Db): Uint8Array {
 
 function appReady(): Promise<ReturnType<typeof createApp>> {
   if (!appPromise) {
-    appPromise = openSqlJsDb().then((db) => {
+    appPromise = openSqlJsDb((message) => {
+      // A failed IndexedDB image write means the store is NOT durable anymore —
+      // surface it to every tab instead of silently losing everything since the
+      // last good save (issue #11).
+      for (const p of peers) p.postMessage({ type: "persistence-error", message });
+      dedicated?.postMessage({ type: "persistence-error", message });
+    }).then((db) => {
       dbRef = db;
       secret = loadSecret(db);
       rooms = new RoomManager(db);
@@ -128,7 +140,7 @@ function appReady(): Promise<ReturnType<typeof createApp>> {
         oidcIssuer: null, // the Local store never signs anyone in: no OIDC provider
         oidcClientId: null,
       };
-      return createApp({ cfg, db, kdf: webCrypto });
+      return createApp({ cfg, db, kdf: webCrypto, rooms });
     });
   }
   return appPromise;
@@ -226,7 +238,12 @@ if ("onconnect" in scope) {
     port.onmessage = route(port);
     port.start();
     peers.add(port);
-    port.addEventListener("close", () => peers.delete(port));
+    port.addEventListener("close", () => {
+      peers.delete(port);
+      // A SharedWorker scope has no unload hook; with no port left it can be reclaimed
+      // at any moment — flush the store image while there is still a worker to save (#11)
+      if (peers.size === 0) void flushNow();
+    });
   };
 } else {
   // dedicated-worker fallback (browsers without SharedWorker): per-page server

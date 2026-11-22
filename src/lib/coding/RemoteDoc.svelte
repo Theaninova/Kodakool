@@ -1061,12 +1061,15 @@
       ws.on("status", (s: { status: string }) => (wsStatus = s.status));
       ws.on("sync", (isSynced: boolean) => {
         synced = isSynced;
-        // the room is authoritative: seed it from the REST snapshot only when it is empty
+        // The room is authoritative. Its TEXT is seeded by the server when the room is
+        // created (Room.load) — a client-side text seed duplicated the whole body when
+        // two tabs observed an empty room at the same moment (issue #10). Entries still
+        // seed here: their map keys are content-derived, so a concurrent second seed
+        // collapses into the same write.
         if (isSynced && !seeded) {
           seeded = true;
-          if (text.length === 0 && map.size === 0) {
+          if (map.size === 0) {
             d.transact(() => {
-              if (info.text !== "") text.insert(0, info.text);
               // mint a uid on every REST-seeded entry: entryId is content-derived
               // without one, so the map key (and livePos geometry) would drift the
               // first time a text edit rewrites the entry's range

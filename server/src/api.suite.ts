@@ -383,6 +383,54 @@ export function runApiSuite(newDb: () => Db | Promise<Db>): void {
       expect(((await relabel.json()) as any).versions[0].label).toBe("checkpoint");
     });
 
+    it("never loses versions under concurrent snapshot + label writes", async () => {
+      // the read-modify-write of the versions JSON must be synchronous: both routes
+      // used to read the row BEFORE awaiting the body, so an interleaved writer rebuilt
+      // the column from a stale copy and a snapshot or label vanished silently (issue #8)
+      const h = await app();
+      const tok = await register(h, "vr@b.de");
+      const proj = (await (
+        await h.request("/api/projects", {
+          method: "POST",
+          headers: json(tok),
+          body: JSON.stringify({ name: "vrace" }),
+        })
+      ).json()) as any;
+      const doc = (await (
+        await h.request(`/api/projects/${proj.id}/docs`, {
+          method: "POST",
+          headers: json(tok),
+          body: JSON.stringify({ name: "v.txt" }),
+        })
+      ).json()) as any;
+      const base = (await (
+        await h.request(`/api/docs/${doc.id}/versions`, {
+          method: "POST",
+          headers: json(tok),
+          body: JSON.stringify({ text: "baseline", codes: [] }),
+        })
+      ).json()) as any;
+
+      await Promise.all([
+        h.request(`/api/docs/${doc.id}/versions/${base.versions[0].id}/label`, {
+          method: "PUT",
+          headers: json(tok),
+          body: JSON.stringify({ label: "keepme" }),
+        }),
+        ...[1, 2, 3].map((i) =>
+          h.request(`/api/docs/${doc.id}/versions`, {
+            method: "POST",
+            headers: json(tok),
+            body: JSON.stringify({ text: `snap${i}`, codes: [] }),
+          }),
+        ),
+      ]);
+      const final = (await (await h.request(`/api/docs/${doc.id}`, { headers: json(tok) })).json()) as any;
+      const texts = final.versions.map((v: any) => v.text);
+      for (const t of ["baseline", "snap1", "snap2", "snap3"]) expect(texts).toContain(t);
+      expect(final.versions.find((v: any) => v.text === "baseline").label).toBe("keepme");
+    });
+
     it("stores the project catalog last-write-wins", async () => {
       const h = await app();
       const tok = await register(h, "c@b.de");

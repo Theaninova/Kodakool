@@ -9,8 +9,12 @@
   import { provideRemote } from "$lib/remote/remote-cache.svelte";
   import { setLocalBackend } from "$lib/local/local-api";
   import { seedExampleProject } from "$lib/client/examples";
+  import { onPersistenceError } from "$lib/local/worker-client";
 
   let { children } = $props();
+  // set when the Local store cannot persist itself anymore (IndexedDB quota…): losing
+  // the research data must never be silent (issue #11)
+  let persistError = $state("");
 
   // the single color source for the whole app (theme + every marker palette)
   const prefs = provideColors();
@@ -23,6 +27,9 @@
   // first visit: seed the bundled example project into the local store
   onMount(() => {
     seedExampleProject().catch((e) => console.warn("example seed failed:", e));
+    return onPersistenceError((message) => {
+      persistError = message; // stays on screen until reload — the worker keeps retrying saves
+    });
   });
   const vars = (t: Record<string, string>) =>
     [
@@ -110,4 +117,31 @@
   {@html `<style>\n${themeCss}\n</style>`}
 </svelte:head>
 
+{#if persistError !== ""}
+  <div class="persistwarn" role="alert">
+    <span class="material-symbols-rounded" aria-hidden="true">warning</span>
+    the local store could not be saved ({persistError}) — new work is only in memory
+  </div>
+{/if}
+
 {@render children()}
+
+<style>
+  .persistwarn {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 1rem;
+    background: #b3261e;
+    color: white;
+    font-size: 0.85rem;
+  }
+  .persistwarn .material-symbols-rounded {
+    font-size: 1.1rem;
+  }
+</style>

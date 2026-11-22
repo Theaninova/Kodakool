@@ -41,6 +41,17 @@ export function onLocalMutated(cb: () => void): () => void {
   return () => mutatedListeners.delete(cb);
 }
 
+/**
+ * Persistence-failure listeners: when the worker cannot write the Local store image to
+ * IndexedDB anymore (quota…), it broadcasts this to every tab — silence used to mean
+ * "everything after the last good save is gone" with no error anywhere (issue #11).
+ */
+const persistErrorListeners = new Set<(message: string) => void>();
+export function onPersistenceError(cb: (message: string) => void): () => void {
+  persistErrorListeners.add(cb);
+  return () => persistErrorListeners.delete(cb);
+}
+
 function ensureWorker(): Chan {
   if (chan) return chan;
   const sw = typeof SharedWorker !== "undefined" ? new LocalSharedWorker({ name: "kodakool-server" }) : null;
@@ -52,7 +63,7 @@ function ensureWorker(): Chan {
   }
   const c: Chan = sw ? (sw.port as unknown as Chan) : new LocalWorker();
   c.onmessage = (e: MessageEvent) => {
-    const m = e.data as { type?: string; id?: number; docId?: string };
+    const m = e.data as { type?: string; id?: number; docId?: string; message?: string };
     if (m?.type === "fetch" || m?.type === "ensure-local") {
       const cb = m.id === undefined ? undefined : pending.get(m.id);
       if (cb && m.id !== undefined) {
@@ -67,6 +78,8 @@ function ensureWorker(): Chan {
       }
     } else if (m?.type === "mutated") {
       for (const l of [...mutatedListeners]) l();
+    } else if (m?.type === "persistence-error" && m.message) {
+      for (const l of [...persistErrorListeners]) l(m.message);
     }
   };
   c.onerror = (e) => {

@@ -34,8 +34,15 @@ async function idbLoad(): Promise<Uint8Array | null> {
   const db = await idbOpen();
   return new Promise((res, rej) => {
     const req = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(IDB_KEY);
-    req.onsuccess = () => res((req.result as Uint8Array | undefined) ?? null);
-    req.onerror = () => rej(req.error);
+    req.onsuccess = () => {
+      const value = (req.result as Uint8Array | undefined) ?? null;
+      db.close();
+      res(value);
+    };
+    req.onerror = () => {
+      db.close();
+      rej(req.error);
+    };
   });
 }
 
@@ -44,8 +51,14 @@ async function idbSave(bytes: Uint8Array): Promise<void> {
   return new Promise((res, rej) => {
     const tx = db.transaction(IDB_STORE, "readwrite");
     tx.objectStore(IDB_STORE).put(bytes, IDB_KEY);
-    tx.oncomplete = () => res();
-    tx.onerror = () => rej(tx.error);
+    tx.oncomplete = () => {
+      db.close();
+      res();
+    };
+    tx.onerror = () => {
+      db.close();
+      rej(tx.error);
+    };
   });
 }
 
@@ -108,23 +121,57 @@ async function loadSqlJs(): Promise<SqlJsStatic> {
   return initSqlJs({ locateFile: (f: string) => (f.endsWith(".wasm") ? wasmUrl : f) });
 }
 
+/** the store image currently holding the IndexedDB slot — one profile, one SharedWorker, one writer */
+let activeStore: { save: () => Promise<void> } | undefined;
+
+/**
+ * Force-save any pending store image right now. A SharedWorker scope has no unload hook,
+ * so callers (worker.ts: the last port closing) use this as the closest thing to one —
+ * a write used to sit only in memory until the debounce fired (issue #11).
+ */
+export function flushNow(): Promise<void> {
+  return activeStore ? activeStore.save() : Promise.resolve();
+}
+
 /**
  * Open the persistent store (browser: IndexedDB-backed; node/tests: plain memory).
  * The schema + additive migrations run on every open (initSchema is idempotent).
+ * `onSaveError` fires when a debounced image write FAILS (quota etc.) — the image stays
+ * dirty and every later write/flush retries, so durability is never silently dead (#11).
  */
-export async function openSqlJsDb(): Promise<Db> {
+export async function openSqlJsDb(onSaveError?: (message: string) => void): Promise<Db> {
   const SQL = await loadSqlJs();
   const persistent = typeof indexedDB !== "undefined";
   const saved = persistent ? await idbLoad() : null;
   const sdb = saved && saved.length > 0 ? new SQL.Database(saved) : new SQL.Database();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let dirty = false;
+  const doSave = () => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    return idbSave(sdb.export()).then(() => {
+      dirty = false;
+    });
+  };
+  const reportFailure = (e: unknown) => {
+    dirty = true; // the image is still unsaved: the next write or flushNow retries it
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("kodakool store: IndexedDB save failed:", message);
+    onSaveError?.(message);
+  };
   const onWrite = () => {
     if (!persistent) return;
+    dirty = true;
     if (timer !== undefined) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = undefined;
-      void idbSave(sdb.export()).catch(() => undefined);
+      doSave().catch(reportFailure);
     }, SAVE_DEBOUNCE_MS);
+  };
+  activeStore = {
+    save: () => (!persistent || !dirty ? Promise.resolve() : doSave().catch(reportFailure)),
   };
   const db = wrapSqlJs(sdb, onWrite);
   initSchema(db);

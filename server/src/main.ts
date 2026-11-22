@@ -11,7 +11,7 @@ const cfg = loadConfig();
 const db = openDb(cfg.dataDir);
 const rooms = new RoomManager(db);
 
-const app = createApp({ cfg, db, kdf: nodeCrypto });
+const app = createApp({ cfg, db, kdf: nodeCrypto, rooms });
 const wss = new WebSocketServer({ noServer: true });
 const server = serve({ fetch: app.fetch, port: cfg.port, hostname: cfg.host }, (info) => {
   console.log(`kodakool-server listening on http://${cfg.host}:${info.port} (data: ${cfg.dataDir})`);
