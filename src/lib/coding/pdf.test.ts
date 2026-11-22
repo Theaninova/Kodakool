@@ -28,6 +28,14 @@ describe("extractPdfText", () => {
     expect(spans[1].page).toBe(1);
     expect(spans[1].y).toBeLessThan(spans[0].y); // second line sits lower on the page
   });
+  it("clamps span ends to the trimmed page text when the last item ends in spaces", async () => {
+    // the page's trailing whitespace is trimmed, but the last item's span was
+    // recorded before that — its end must be clamped, or it bleeds into the next page
+    const { text, spans } = await extractPdfDoc(buildPdf(["First", "Second   "]));
+    expect(text).toBe("First\nSecond");
+    for (const s of spans) expect(s.end).toBeLessThanOrEqual(text.length);
+    expect(text.slice(spans[1].start, spans[1].end)).toBe("Second");
+  });
 });
 
 describe("soft-break unwrap (JOIN_SOFT_BREAKS)", () => {

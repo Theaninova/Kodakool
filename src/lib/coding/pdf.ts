@@ -77,6 +77,10 @@ export async function extractPdfDoc(data: Uint8Array | ArrayBuffer): Promise<Pdf
       prev = { x: it.x, width: it.width, eol: it.hasEOL };
     }
     const pageText = out.replace(/\s+$/, "");
+    // the page trim can remove whitespace a recorded span still claims; clamp so
+    // no span ever bleeds past the page text (next page's spans sit right after it)
+    const pageEnd = base + pageText.length;
+    for (const s of spans) if (s.end > pageEnd) s.end = pageEnd;
     base += pageText.length + 2; // + the "\n\n" page separator
     return pageText;
   });
