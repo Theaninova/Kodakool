@@ -57,18 +57,25 @@ export function verifyEntry(sourceText: string, entry: CodeEntry): string | null
     return entry.excerpt === span ? null : "excerpt does not match the text at this range";
   }
   let pos = 0;
-  for (let i = 0; i < segments.length; i++) {
+  for (let i = 0; i < segments.length - 1; i++) {
     const seg = segments[i];
     const idx = i === 0 ? (span.startsWith(seg) ? 0 : -1) : span.indexOf(seg, pos + 1);
     if (idx === -1) {
       return `segment ${i + 1} (${JSON.stringify(seg)}) does not appear in order within the range`;
     }
-    if (i === segments.length - 1 && idx + seg.length !== span.length) {
-      return `last segment must end exactly at range end (found it ending at offset ${idx + seg.length} of ${span.length})`;
-    }
     pos = idx + seg.length;
   }
-  return null;
+  const last = segments[segments.length - 1];
+  const lastIdx = span.indexOf(last, pos + 1);
+  if (lastIdx === -1) {
+    return `segment ${segments.length} (${JSON.stringify(last)}) does not appear in order within the range`;
+  }
+  // the first occurrence found may end early; the segment may sit anywhere left
+  // of the end as long as one also occurs as a suffix with >= 1 omitted char before it
+  if (span.endsWith(last) && span.length - last.length > pos) {
+    return null;
+  }
+  return `last segment must end exactly at range end (found it ending at offset ${lastIdx + last.length} of ${span.length})`;
 }
 
 /** Verify a whole coding file against its source text. Entries may overlap. */

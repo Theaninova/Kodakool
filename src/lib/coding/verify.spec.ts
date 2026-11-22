@@ -81,6 +81,19 @@ describe("verifyEntry — ellipsis spans", () => {
   test("an empty excerpt is rejected", () => {
     expect(verifyEntry(TEXT, entry({ excerpt: "" }))).toMatch(/must not start or end with/);
   });
+
+  test("a last segment that also occurs earlier is anchored at the range end", () => {
+    const span = "abcabcabc";
+    const at = (excerpt: string) => verifyEntry(span, entry({ range: [0, span.length], excerpt }));
+    // "abc" first occurs at 3 (ending mid-span) — the suffix occurrence at 6 is the valid anchor
+    expect(at(`a${ELLIPSIS}abc`)).toBeNull();
+    // no suffix occurrence at all: the "ends exactly at range end" rejection stays
+    expect(at(`a${ELLIPSIS}ab`)).toMatch(/last segment must end exactly at range end/);
+    // glued segments leave nothing omitted: rejected as "no room" / order
+    expect(verifyEntry("abcabc", entry({ range: [0, 6], excerpt: `abc${ELLIPSIS}abc` }))).toMatch(
+      /does not appear in order/,
+    );
+  });
 });
 
 describe("verifyEntry — range/line bounds", () => {
