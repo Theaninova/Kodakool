@@ -114,14 +114,28 @@ export async function exchangeFlow(
   return user;
 }
 
-function upsertOidcUser(db: Db, iss: string, claims: Record<string, unknown>): UserRow {
+export function upsertOidcUser(db: Db, iss: string, claims: Record<string, unknown>): UserRow {
   const sub = String(claims.sub);
-  const email = typeof claims.email === "string" ? claims.email : null;
+  let email = typeof claims.email === "string" ? claims.email : null;
   const name =
     (typeof claims.name === "string" && claims.name) ||
     (typeof claims.preferred_username === "string" && claims.preferred_username) ||
     email ||
     sub;
+  if (email !== null) {
+    const taken = db.prepare("SELECT id FROM users WHERE email = ?").get(email) as { id: string } | undefined;
+    if (taken !== undefined) {
+      // the email belongs to a password account: link the IdP identity onto it, but only
+      // when the IdP attests the address is verified — otherwise an IdP where emails are
+      // free to pick would hand over existing accounts.
+      if (claims.email_verified === true) {
+        db.prepare("UPDATE users SET oidc_iss = ?, oidc_sub = ? WHERE id = ?").run(iss, sub, taken.id);
+        return userByOidc(db, iss, sub) as UserRow;
+      }
+      // SQLite UNIQUE allows many NULLs: keep the login working with no email
+      email = null;
+    }
+  }
   const id = crypto.randomUUID();
   db.prepare(
     "INSERT INTO users (id, email, name, pass, oidc_iss, oidc_sub, created) VALUES (?, ?, ?, NULL, ?, ?, ?)",
