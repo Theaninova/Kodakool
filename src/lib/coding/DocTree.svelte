@@ -8,6 +8,16 @@
   import { compareNames, docIcon, displayName } from "$lib/coding/display";
   import { openRowMenu } from "$lib/coding/context-menu";
   import { toQdc } from "$lib/coding/qdc";
+  import { buildPalette } from "$lib/coding/palette";
+  import {
+    buildProjectExportModel,
+    openProjectPrint,
+    projectPrintHtml,
+    projectXlsx,
+    type ExportModel,
+  } from "$lib/coding/project-export";
+  import { useTheme } from "$lib/coding/theme.svelte";
+  import { scopeToProject, type StoreBlob } from "$lib/client/blob";
   import { useColors } from "$lib/coding/prefs.svelte";
   import RowMenu from "$lib/coding/RowMenu.svelte";
   import { buildTree, flattenRows, type TreeRow } from "$lib/coding/tree";
@@ -19,16 +29,18 @@
     deleteFolder,
     deleteSubfolder,
     duplicateArticle,
+    exportProject,
     moveArticle,
     moveArticleProject,
     renameArticle,
+    renameFolder,
     renameSubfolder,
     watchSubfoldersLocal,
   } from "$lib/local/local-api";
   import type { ArticleSummary } from "$lib/coding/doc";
   import DatabaseControls from "$lib/client/DatabaseControls.svelte";
   import { createProjectDoc, openDoc, openNewDoc, openRemoteDoc } from "$lib/client/open-doc";
-  import { downloadArticle, downloadText } from "$lib/client/download";
+  import { downloadArticle, downloadBlob, downloadText } from "$lib/client/download";
   import { uploadArticleFile, uploadArticleFolder } from "$lib/client/upload";
   import UploadZone from "$lib/client/UploadZone.svelte";
   import AccountPanel from "$lib/coding/AccountPanel.svelte";
@@ -43,7 +55,8 @@
    * open project + a dropdown of every OTHER project, ending with the "new project"
    * row; picking one opens that project's first document, creating one when it is
    * empty), the collapsible project header (the selected upload target) whose menu
-   * offers new document / new folder / upload file / upload folder / .qdc export /
+   * offers new document / new folder / upload file / upload folder / .qdc + PDF +
+   * XLSX project exports / project deletion,
    * project deletion, the compact upload row, the nested subfolder tree (folders
    * fold, docs live in folders or at the project root) and the database
    * export/import row below the project switcher.
@@ -83,6 +96,7 @@
   } = $props();
 
   const prefs = useColors();
+  const themeState = useTheme();
   const accounts = useAccounts();
   const remote = useRemote();
   const isLocal = $derived(account === LOCAL_ACCOUNT_ID);
@@ -92,6 +106,11 @@
   let newProj = $state(false);
   let projName = $state("");
   let projErr = $state("");
+  /** open state of the switcher dropdown (button rows close it before opening the dialog/rename row) */
+  let switchOpen = $state(false);
+  /** inline project rename: the project being renamed + its typed new name */
+  let projRenaming = $state<string | null>(null);
+  let projNewName = $state("");
 
   /** the dropdown's "new project" row — a sentinel value, never a real project name */
   const NEW_PROJECT = "__new__";
@@ -102,7 +121,6 @@
    */
   let picked = $state("");
 
-  /** the dropdown offers every OTHER project (the open one is the chip itself) + creation */
   /** the project header folds its document list: `folder_open` while it is shown */
   let open = $state(true);
 
@@ -170,7 +188,10 @@
     return out;
   });
   /** select items so the trigger keeps its label while the menu is closed */
+  /** the dropdown lists every project (the open one FIRST — it carries the rename +
+      delete buttons too; picking it is a no-op) + remote projects + creation */
   const items = $derived([
+    ...(isLocal ? [{ value: `local:${folder}`, label: folder }] : []),
     ...others.map((name) => ({ value: `local:${name}`, label: name })),
     ...remoteProjects.map((p) => ({ value: `remote:${p.accId}::${p.name}`, label: `${p.name} · ${p.accLabel}` })),
     { value: NEW_PROJECT, label: "New project" },
@@ -510,10 +531,95 @@
     if (instr === null) return;
     downloadText(`${folder}.qdc`, toQdc(instr, { origin: folder, options: prefs.options }), "application/xml");
   }
+
+  /** the store blob scoped to this project + the catalog: the base of the PDF/XLSX exports */
+  async function exportModel(): Promise<ExportModel | null> {
+    if (isLocal) return buildProjectExportModel(folder, await exportProject(folder), instr);
+    const ctx = remoteCtx();
+    if (ctx === null) return null;
+    return buildProjectExportModel(
+      folder,
+      scopeToProject((await ctx.api.exportDb(ctx.token)) as StoreBlob, folder),
+      instr,
+    );
+  }
+  async function exportXlsx(): Promise<void> {
+    treeErr = "";
+    busy = true;
+    try {
+      const model = await exportModel();
+      if (model === null) return;
+      downloadBlob(
+        `${folder}.xlsx`,
+        new Blob([projectXlsx(model)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+      );
+    } catch (e) {
+      treeErr = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+  /** the PDF export is a print window (its own print CSS); the browser saves it as PDF */
+  async function exportPdf(): Promise<void> {
+    treeErr = "";
+    busy = true;
+    try {
+      const model = await exportModel();
+      if (model === null) return;
+      const pal = buildPalette(
+        model.rows.map((r) => r.code),
+        prefs.options,
+      );
+      const theme = themeState.theme;
+      const ok = openProjectPrint(
+        projectPrintHtml(model, (code) => pal.get(code)?.[theme] ?? { marker: "#6750a4", on: "#ffffff" }),
+      );
+      if (!ok) treeErr = "The browser blocked the export window — allow popups to export the PDF.";
+    } catch (e) {
+      treeErr = String(e);
+    } finally {
+      busy = false;
+    }
+  }
   async function removeProject(): Promise<void> {
     await deleteFolder(folder);
     // the open project is gone: the root reopens the last surviving document
     await goto(resolve("/"));
+  }
+
+  /** start the inline project rename row (from the dropdown's or the header's edit pill) */
+  function startProjRename(name: string): void {
+    switchOpen = false;
+    newProj = false;
+    projRenaming = name;
+    projNewName = name;
+    projErr = "";
+  }
+  async function commitProjRename(): Promise<void> {
+    const old = projRenaming;
+    const next = projNewName.trim();
+    projRenaming = null;
+    if (old === null || next === "" || next === old) return;
+    busy = true;
+    projErr = "";
+    try {
+      await renameFolder(old, next);
+      // renaming the open project: follow the document to its new URL
+      if (old === folder) await goto(resolve("/text/[folder]/[name]", { folder: next, name: currentName }));
+    } catch (e) {
+      projErr = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+  /** countdown-confirmed project delete, from the dropdown's or the header's delete pill */
+  function askDeleteProject(name: string): void {
+    switchOpen = false;
+    confirm.ask(
+      `Delete project ${name}/?`,
+      "Deletes the project with all its documents, coding entries and its frame-device catalog.",
+      () => void (name === folder ? removeProject() : deleteFolder(name)),
+    );
   }
 
   $effect(() => {
@@ -524,7 +630,13 @@
 
 <aside class="docs">
   <div class="projrow">
-    <Select.Root type="single" {items} bind:value={picked} onValueChange={(name: string) => pickProject(name)}>
+    <Select.Root
+      type="single"
+      {items}
+      bind:value={picked}
+      bind:open={switchOpen}
+      onValueChange={(name: string) => pickProject(name)}
+    >
       <Select.Trigger class="switchbtn" aria-label="Switch project" title="Switch to another project">
         <span class="material-symbols-rounded switchicon" aria-hidden="true">folder</span>
         <span class="switchcol">
@@ -538,6 +650,39 @@
           {#if it.value === NEW_PROJECT}
             <Select.Item class="switchopt newopt" value={NEW_PROJECT} label="New project">
               <span class="material-symbols-rounded" aria-hidden="true">create_new_folder</span>New project
+            </Select.Item>
+          {:else if it.value.startsWith("local:") && isLocal}
+            {@const pname = it.value.slice("local:".length)}
+            <Select.Item class="switchopt" value={it.value} label={it.label}>
+              <span class="optlabel">{it.label}</span>
+              <button
+                type="button"
+                class="optbtn"
+                title="Rename project"
+                aria-label={`Rename project ${pname}`}
+                onpointerdown={(e) => e.stopPropagation()}
+                onpointerup={(e) => e.stopPropagation()}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  startProjRename(pname);
+                }}
+              >
+                <span class="material-symbols-rounded" aria-hidden="true">edit</span>
+              </button>
+              <button
+                type="button"
+                class="optbtn danger"
+                title="Delete project"
+                aria-label={`Delete project ${pname}`}
+                onpointerdown={(e) => e.stopPropagation()}
+                onpointerup={(e) => e.stopPropagation()}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  askDeleteProject(pname);
+                }}
+              >
+                <span class="material-symbols-rounded" aria-hidden="true">delete</span>
+              </button>
             </Select.Item>
           {:else}
             <Select.Item class="switchopt" value={it.value} label={it.label}>{it.label}</Select.Item>
@@ -568,6 +713,36 @@
       />
       <button type="button" class="nfgo" disabled={busy || projName.trim() === ""} onclick={() => void newProject()}>
         create
+      </button>
+    </div>
+  {/if}
+  {#if projRenaming !== null}
+    <div class="nfrow">
+      <input
+        type="text"
+        class="nfinput"
+        placeholder="New project name"
+        aria-label={`New name for project ${projRenaming}`}
+        spellcheck="false"
+        use:focusFirst
+        bind:value={projNewName}
+        onkeydown={(e) => {
+          if (e.key === "Enter") {
+            e.stopPropagation();
+            void commitProjRename();
+          } else if (e.key === "Escape") {
+            e.stopPropagation();
+            projRenaming = null;
+          }
+        }}
+      />
+      <button
+        type="button"
+        class="nfgo"
+        disabled={busy || projNewName.trim() === ""}
+        onclick={() => void commitProjRename()}
+      >
+        rename
       </button>
     </div>
   {/if}
@@ -642,6 +817,30 @@
               {#if isLocal}
                 <button
                   type="button"
+                  class="fgbtn"
+                  title="Rename project"
+                  aria-label="Rename project"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    startProjRename(folder);
+                  }}
+                >
+                  <span class="material-symbols-rounded" aria-hidden="true">edit</span>
+                </button>
+                <button
+                  type="button"
+                  class="fgbtn danger"
+                  title="Delete project"
+                  aria-label="Delete project"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    askDeleteProject(folder);
+                  }}
+                >
+                  <span class="material-symbols-rounded" aria-hidden="true">delete</span>
+                </button>
+                <button
+                  type="button"
                   class="menubtn"
                   title="Project actions"
                   aria-label="Project menu"
@@ -663,7 +862,11 @@
                 { label: "Upload File", icon: "upload_file", onSelect: () => pickFiles(target) },
                 { label: "Upload Folder", icon: "drive_folder_upload", onSelect: () => pickFolder(target) },
                 ...(instr
-                  ? [{ label: "Export .qdc", icon: "file_download", sep: true, onSelect: () => exportQdc() }]
+                  ? [
+                      { label: "Export .qdc", icon: "file_download", sep: true, onSelect: () => exportQdc() },
+                      { label: "Export XLSX", icon: "table_chart", onSelect: () => void exportXlsx() },
+                      { label: "Export PDF", icon: "picture_as_pdf", onSelect: () => void exportPdf() },
+                    ]
                   : []),
                 {
                   label: "Delete project",
@@ -1063,6 +1266,40 @@
       color: var(--on-primary-container, #21005d);
       font-weight: 700;
     }
+
+    /* the project name: truncates before the rename/delete pills */
+    .optlabel {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* per-project pills (stopPropagation keeps the pick from switching projects) */
+    .optbtn {
+      font: inherit;
+      display: inline-flex;
+      flex: 0 0 auto;
+      border: none;
+      background: none;
+      padding: 0.1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--on-surface-variant, #666);
+
+      .material-symbols-rounded {
+        font-size: 1rem;
+      }
+
+      &:hover {
+        color: var(--primary, #6750a4);
+      }
+
+      &.danger:hover {
+        color: #b3261e;
+      }
+    }
   }
   /* the dropdown's last row: create a project (separated from the project list) */
   :global(.switchopt.newopt) {
@@ -1145,6 +1382,32 @@
     /* the count + menu ride the row's right edge, like in the document rows */
     .fcodes {
       margin-left: auto;
+    }
+
+    /* visible rename + delete pills (the menu keeps the same actions too) */
+    .fgbtn {
+      font: inherit;
+      display: inline-flex;
+      border: none;
+      background: none;
+      padding: 0.05rem 0.15rem;
+      border-radius: 6px;
+      cursor: pointer;
+      color: inherit;
+      opacity: 0.75;
+
+      .material-symbols-rounded {
+        font-size: 1rem;
+      }
+
+      &:hover {
+        opacity: 1;
+        color: var(--primary, #6750a4);
+      }
+
+      &.danger:hover {
+        color: #b3261e;
+      }
     }
 
     .menubtn {

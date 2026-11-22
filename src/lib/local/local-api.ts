@@ -127,6 +127,15 @@ export async function deleteFolder(name: string): Promise<void> {
   void refreshLocalTree().catch(() => undefined);
 }
 
+/** rename a project (409 on a taken name — the row keeps its name, like renameArticle) */
+export async function renameFolder(name: string, next: string): Promise<void> {
+  const { api, token } = await ctx();
+  const p = await projectByName(api, token, name);
+  if (!p) throw new Error(`project "${name}" not found`);
+  await api.renameProject(token, p.id, next);
+  void refreshLocalTree().catch(() => undefined);
+}
+
 async function projectByName(api: RemoteApi, token: string, name: string): Promise<RemoteProject | null> {
   const list = await api.projects(token);
   return list.find((p) => p.name === name) ?? null;
@@ -413,43 +422,10 @@ export async function exportDatabase(): Promise<unknown> {
   return api.exportDb(token);
 }
 
-/** the worker server's export blob shape (server/src/app.ts is the source) */
-export interface StoreBlob {
-  version: number;
-  users: { id: string; email?: string | null; name?: string; created?: number }[];
-  projects: { id: string; owner?: string; name: string; subs?: string; created?: number }[];
-  members: { project_id: string; user_id: string }[];
-  documents: {
-    id: string;
-    project_id: string;
-    name: string;
-    folder?: string;
-    kind?: string;
-    text?: string;
-    codes?: string;
-    versions?: string;
-    updated?: number;
-  }[];
-  catalogs: { project_id: string; data: string }[];
-  pdfs: { doc_id: string }[];
-  states: { doc_id: string }[];
-  meta: { key: string }[];
-}
+import { scopeToProject, type StoreBlob } from "$lib/client/blob";
 
-/** narrow a whole-store blob to one project (users/meta ride along: a valid import) */
-export function scopeToProject(dump: StoreBlob, name: string): StoreBlob {
-  const pids = new Set(dump.projects.filter((p) => p.name === name).map((p) => p.id));
-  const docIds = new Set(dump.documents.filter((d) => pids.has(d.project_id)).map((d) => d.id));
-  return {
-    ...dump,
-    projects: dump.projects.filter((p) => pids.has(p.id)),
-    members: dump.members.filter((m) => pids.has(m.project_id)),
-    documents: dump.documents.filter((d) => pids.has(d.project_id)),
-    catalogs: dump.catalogs.filter((c) => pids.has(c.project_id)),
-    pdfs: dump.pdfs.filter((p) => docIds.has(p.doc_id)),
-    states: dump.states.filter((s) => docIds.has(s.doc_id)),
-  };
-}
+export { scopeToProject };
+export type { StoreBlob };
 
 /** a project-scoped export: a valid StoreBlob subset the import merges unchanged */
 export async function exportProject(name: string): Promise<StoreBlob> {

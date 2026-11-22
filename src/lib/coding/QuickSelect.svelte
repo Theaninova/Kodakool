@@ -447,7 +447,7 @@
         <span class="qname" style={`top: ${preview.top}px; right: calc(100% + 5px)`}>{previewName}</span>
       {/if}
     </div>
-    <div class="qright" role="menu" aria-label="Device categories">
+    <div class="qright" role="menu" aria-label="Codes">
       {#each columns as col, c (c)}
         <div class="qcol" style={`top: ${cascade[c]}px; left: ${c * COL_W}px`}>
           {#each col as node (node.id)}

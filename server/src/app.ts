@@ -221,6 +221,33 @@ export function createApp({ cfg, db, kdf }: AppDeps): Hono {
     return c.json({ subs });
   });
 
+  /** rename a project (owner only): the id survives, per-owner name uniqueness is enforced */
+  app.put("/api/projects/:id", async (c) => {
+    const u = me(c);
+    const p = projectAccess(db, c.req.param("id"), u.id);
+    if (!p) return c.json({ error: "not found" }, 404);
+    if (p.owner !== u.id) return c.json({ error: "only the owner can rename a project" }, 403);
+    const body = projectBody.safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ error: "name required" }, 400);
+    const name = body.data.name.trim();
+    if (name === "") return c.json({ error: "name required" }, 400);
+    if (name !== p.name && db.prepare("SELECT id FROM projects WHERE owner = ? AND name = ?").get(u.id, name))
+      return c.json({ error: `"${name}" already exists` }, 409);
+    db.prepare("UPDATE projects SET name = ? WHERE id = ?").run(name, p.id);
+    storeEvents.emit({ kind: "project", project: p.id });
+    const subs = db.prepare("SELECT subs FROM projects WHERE id = ?").get(p.id) as { subs: string };
+    const docs = db.prepare("SELECT COUNT(*) AS n FROM documents WHERE project_id = ?").get(p.id) as { n: number };
+    return c.json({
+      id: p.id,
+      name,
+      owner: p.owner,
+      ownerName: "",
+      role: "owner",
+      docs: docs.n,
+      subs: parseJson<string[]>(subs.subs, []),
+    });
+  });
+
   app.delete("/api/projects/:id", (c) => {
     const u = me(c);
     const p = projectAccess(db, c.req.param("id"), u.id);

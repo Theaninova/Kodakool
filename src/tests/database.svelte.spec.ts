@@ -171,11 +171,15 @@ describe("database export/import", () => {
       .poll(() => document.querySelector(".dbmsg")?.textContent, { timeout: 8000 })
       .toMatch(/imported \d+ documents/);
 
-    // the imported data is live AND this store's own data survived the merge
+    // the imported data is live AND this store's own data survived the merge;
+    // the foreign copy of this store's own "test" project could NOT overwrite it —
+    // it landed as a freshly keyed "test1" (import never overwrites projects)
     expect(await getArticle("restored", "restored doc")).toBeTruthy();
     expect(await getArticle("restored", "nested doc")).toBeTruthy();
     expect(await getArticle(FOLDER, NAME)).toBeTruthy();
-    expect((await listFolders()).sort()).toEqual(["restored", FOLDER]);
+    expect(await getArticle(`${FOLDER}1`, NAME)).toBeTruthy();
+    expect((await listFolders()).sort()).toEqual(["restored", FOLDER, `${FOLDER}1`]);
+    expect(document.querySelector(".dbmsg")?.textContent).toMatch(/1 as new project/);
 
     // one user row per email, the foreign references adopted the existing user's id,
     // and the unregistered subfolder of the nested document was registered by the merge

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { ScrollArea } from "bits-ui";
   import "material-symbols/rounded.css";
-  import { buildCatalogView, type CatalogView } from "$lib/coding/catalog-view";
   import CatalogTree from "$lib/coding/CatalogTree.svelte";
+  import type { CatalogView } from "$lib/coding/catalog-view";
   import type { ConfirmAsk } from "$lib/coding/confirm.svelte";
   import {
     addChildDevice,
@@ -10,7 +10,6 @@
     findDevice,
     moveDevice,
     removeDeviceById,
-    siblingsOf,
     type FrameDevice,
     type Instructions,
   } from "$lib/coding/instructions";
@@ -21,11 +20,12 @@
   import { downloadText } from "$lib/client/download";
 
   /**
-   * The coding page's frame-devices sidebar: the catalog tree (arm devices for
-   * coding), inline editing (rename / tag / grip reorder / add / delete on a
-   * draft), and the JSON/.qdc export + import row. The effective catalog is
-   * computed by the page (`buildCatalogView(localCatalog, entryKeys)`); this
-   * component owns the edit draft and the local-override persistence.
+   * The coding page's codes sidebar: the catalog tree — one uniform level of
+   * codes (a code may carry children) — with everything edited straight on the
+   * stored catalog: inline rename (row menu), tag override, grip reorder from
+   * the row's end, add / delete through the row menu. Plus the JSON/.qdc
+   * export + import row and the remove-catalog control. The effective catalog
+   * is computed by the page (`buildCatalogView(localCatalog, entryKeys)`).
    */
   let {
     folder,
@@ -53,40 +53,15 @@
     onpick: (id: string) => void;
     onhover: (id: string | null) => void;
     styleFor: (node: CatalogView) => string;
-    /** catalog persistence: RxDB by default, the remote page passes the server API */
+    /** catalog persistence: the local store by default, the remote page passes the server API */
     onsave?: (folder: string, instr: Instructions) => Promise<void>;
     onclear?: (folder: string) => Promise<void>;
   } = $props();
 
-  let editCat = $state(false);
-  let draft = $state<Instructions | null>(null);
-  let catMsg = $state("");
-  let catBusy = $state(false);
   let catIoMsg = $state("");
   let catImport = $state<HTMLInputElement | undefined>(undefined);
 
-  /** edit-mode tree built from the draft catalog */
-  const draftView = $derived(draft === null ? [] : buildCatalogView(draft, entryKeys));
-
-  function draftRename(id: string, name: string): void {
-    if (!draft) return;
-    const d = findDevice(draft.devices, id);
-    if (d) d.name = name;
-  }
-  function draftTag(id: string, tag: string): void {
-    if (!draft) return;
-    const d = findDevice(draft.devices, id);
-    if (!d) return;
-    const t = tag.trim();
-    if (t) d.tag = t;
-    else delete d.tag;
-  }
-  /** drop dragId onto targetId: sibling moves reorder, other targets adopt the device as their last child */
-  function draftMove(dragId: string, targetId: string): void {
-    if (!draft) return;
-    moveDevice(draft.devices, dragId, targetId);
-  }
-  /** a fresh device for the tree: new UUID, editable placeholder name, kind inherited */
+  /** a fresh code for the tree: new UUID, editable placeholder name, kind inherited */
   function newDevice(kind?: FrameDevice["kind"]): FrameDevice {
     return {
       id: crypto.randomUUID(),
@@ -96,37 +71,7 @@
       children: [],
     };
   }
-  /** new device under `parentId` (null = top level); fresh UUID, editable name */
-  function draftAdd(parentId: string | null): void {
-    if (!draft) return;
-    const parent = parentId === null ? null : findDevice(draft.devices, parentId);
-    if (parent === null && parentId !== null) return;
-    addChildDevice(draft.devices, parentId, newDevice(parent?.kind));
-  }
-  /** new device as the sibling directly BELOW `id` in the draft */
-  function draftAddBelow(id: string): void {
-    if (!draft) return;
-    const above = findDevice(draft.devices, id);
-    if (!above) return;
-    addBelowDevice(draft.devices, id, newDevice(above.kind));
-  }
-  /** remove a device from the draft (entries referencing it survive as orphans) */
-  function draftDelete(id: string): void {
-    if (!draft) return;
-    removeDeviceById(draft.devices, id);
-  }
-  /**
-   * Delete a device straight from the stored local catalog (the row context menu
-   * in view mode; same orphan rule as draft deletion).
-   */
-  function removeDevice(id: string): void {
-    if (localCatalog === null) return;
-    const copy = plainClone(localCatalog);
-    const removed = removeDeviceById(copy.devices, id);
-    if (!removed) return;
-    void persist(copy, `Device "${removed.name}" deleted — its entries stay as orphaned codes`, "delete failed");
-  }
-  /** write a mutated catalog copy back to the store (view-mode row-menu edits) */
+  /** write a mutated catalog copy back to the store (every row-menu edit goes through here) */
   function persist(copy: Instructions, note: string, failLabel: string): Promise<void> {
     return onsave(folder, copy)
       .then(() => {
@@ -137,25 +82,69 @@
         catIoMsg = `${failLabel}: ${e instanceof Error ? e.message : String(e)}`;
       });
   }
-  /** view-mode row menu: a child device straight into the stored local catalog */
+  /** row menu Rename (inline commit): apply the name and/or tag straight to the stored catalog */
+  function storeEdit(id: string, patch: { name?: string; tag?: string }): void {
+    if (localCatalog === null) return;
+    const copy = plainClone(localCatalog);
+    const d = findDevice(copy.devices, id);
+    if (!d) return;
+    if (patch.name !== undefined) d.name = patch.name;
+    if (patch.tag !== undefined) {
+      const t = patch.tag.trim();
+      if (t === "") delete d.tag;
+      else d.tag = t;
+    }
+    void persist(copy, `Device "${d.name}" updated`, "save failed");
+  }
+  /** grip drag: reorder/re-parent straight on the stored catalog */
+  function storeMove(dragId: string, targetId: string): void {
+    if (localCatalog === null) return;
+    const copy = plainClone(localCatalog);
+    if (!moveDevice(copy.devices, dragId, targetId)) return;
+    void persist(copy, "", "move failed");
+  }
+  /** header `New code`: under the armed code when one is armed, else top level
+      (bootstrapping an empty catalog from nothing) */
+  function addStoredTop(): void {
+    if (localCatalog === null) {
+      void persist({ version: 1, title: folder, devices: [newDevice()] }, "New code added", "save failed");
+      return;
+    }
+    if (armed === null) {
+      const copy = plainClone(localCatalog);
+      addChildDevice(copy.devices, null, newDevice());
+      void persist(copy, "New code added", "save failed");
+      return;
+    }
+    addStoredChild(armed);
+  }
+  /** row menu: a child code straight into the stored local catalog */
   function addStoredChild(parentId: string): void {
     if (localCatalog === null) return;
     const copy = plainClone(localCatalog);
     const parent = findDevice(copy.devices, parentId);
     if (!parent) return;
     addChildDevice(copy.devices, parentId, newDevice(parent.kind));
-    void persist(copy, `New device added under "${parent.name}"`, "save failed");
+    void persist(copy, `New code added under "${parent.name}"`, "save failed");
   }
-  /** view-mode row menu: a sibling device directly below `id` in the stored catalog */
+  /** row menu: a sibling code directly below `id` in the stored catalog */
   function addStoredBelow(id: string): void {
     if (localCatalog === null) return;
     const copy = plainClone(localCatalog);
     const above = findDevice(copy.devices, id);
     if (!above) return;
     addBelowDevice(copy.devices, id, newDevice(above.kind));
-    void persist(copy, `New device added below "${above.name}"`, "save failed");
+    void persist(copy, `New code added below "${above.name}"`, "save failed");
   }
-  /** shared countdown confirmation for draft + stored deletes (same orphan rule) */
+  /** remove a device straight from the stored local catalog (entries survive as orphan codes) */
+  function removeDevice(id: string): void {
+    if (localCatalog === null) return;
+    const copy = plainClone(localCatalog);
+    const removed = removeDeviceById(copy.devices, id);
+    if (!removed) return;
+    void persist(copy, `Device "${removed.name}" deleted — its entries stay as orphaned codes`, "delete failed");
+  }
+  /** shared countdown confirmation for deletes (orphan rule: entries survive) */
   function confirmDelete(d: FrameDevice, perform: () => void): void {
     const used = entryKeys.filter((k) => k === d.id).length;
     confirm.ask(
@@ -166,59 +155,31 @@
       perform,
     );
   }
-  function askDeleteDevice(id: string): void {
-    if (!draft) return;
-    const d = findDevice(draft.devices, id);
-    if (d) confirmDelete(d, () => draftDelete(id));
-  }
-  /** view-mode row menu: the same countdown confirmation, applied to the stored catalog */
+  /** row menu delete: the countdown confirmation, applied to the stored catalog */
   function askRemoveDevice(id: string): void {
     if (localCatalog === null) return;
     const d = findDevice(localCatalog.devices, id);
     if (d) confirmDelete(d, () => removeDevice(id));
   }
+  /** remove the whole local catalog (counts the same orphan rule: entries survive) */
+  function askRemoveCatalog(): void {
+    confirm.ask(
+      `Remove the catalog of ${folder}?`,
+      "The stored frame-device catalog is discarded; coded entries survive as orphaned codes.",
+      () =>
+        void onclear(folder)
+          .then(() => {
+            localCatalog = null;
+            catIoMsg = "catalog removed";
+          })
+          .catch((e: unknown) => {
+            catIoMsg = `remove failed: ${e instanceof Error ? e.message : String(e)}`;
+          }),
+    );
+  }
   /** Proxy-safe deep clone: Svelte 5 props/$state are proxies and structuredClone rejects them. */
   function plainClone<T>(v: T): T {
     return JSON.parse(JSON.stringify(v)) as T;
-  }
-  function startEditCat(): void {
-    catMsg = "";
-    draft = plainClone(localCatalog);
-    editCat = true;
-  }
-  /** header add buttons: enter edit mode (starting an empty catalog when none exists)
-      and add a device — `new category` at top level, `new code` under the armed device */
-  function startAdd(parentId: string | null): void {
-    if (!editCat) {
-      draft = localCatalog === null ? { version: 1, title: folder, devices: [] } : plainClone(localCatalog);
-      editCat = true;
-    }
-    draftAdd(parentId);
-  }
-  function cancelCat(): void {
-    editCat = false;
-    draft = null;
-    catMsg = "";
-  }
-  async function saveCat(): Promise<void> {
-    if (!draft) return;
-    catBusy = true;
-    catMsg = "";
-    try {
-      await onsave(folder, draft);
-      localCatalog = plainClone(draft);
-      editCat = false;
-      draft = null;
-    } catch (e) {
-      catMsg = e instanceof Error ? e.message : String(e);
-    } finally {
-      catBusy = false;
-    }
-  }
-  async function resetCat(): Promise<void> {
-    await onclear(folder);
-    localCatalog = null;
-    cancelCat();
   }
 
   // ----- frame-device catalog export / import (local override only) -----
@@ -257,98 +218,53 @@
           <div class="cathead">
             <button
               type="button"
-              class="cattool addcat"
-              title="Add a new code category (top-level device)"
-              onclick={() => startAdd(null)}
-            >
-              <span class="material-symbols-rounded" aria-hidden="true">add</span>New category
-            </button>
-            <button
-              type="button"
               class="cattool addcode"
-              title={armed === null
-                ? "Add a new code (top-level; arm a device first to nest under it)"
-                : "Add a new code under the armed device"}
-              onclick={() => startAdd(armed)}
+              title={armed === null ? "Add a new code (top level)" : "Add a new code under the armed device"}
+              onclick={addStoredTop}
             >
               <span class="material-symbols-rounded" aria-hidden="true">add</span>New code
             </button>
-            {#if !editCat && localCatalog !== null}
-              <button type="button" class="editcat" aria-label="Edit devices" onclick={startEditCat}>
-                <span class="material-symbols-rounded" aria-hidden="true">edit</span>Edit
-              </button>
-            {/if}
-          </div>
-          {#if !editCat && localCatalog !== null}
-            <div class="cattools">
+            <button
+              type="button"
+              class="cattool"
+              onclick={() => catImport?.click()}
+              title="Import frame devices from .json or .qdc"
+            >
+              <span class="material-symbols-rounded" aria-hidden="true">file_upload</span>Import
+            </button>
+            <input
+              type="file"
+              accept=".json,.qdc"
+              class="catfile"
+              bind:this={catImport}
+              onchange={(e) => void importCat(e)}
+            />
+            {#if localCatalog !== null}
               <button type="button" class="cattool" onclick={exportCatJson} title="Export frame devices as JSON">
                 <span class="material-symbols-rounded" aria-hidden="true">file_download</span>JSON
               </button>
               <button type="button" class="cattool" onclick={exportCatQdc} title="Export frame devices as .qdc (lossy)">
                 <span class="material-symbols-rounded" aria-hidden="true">file_download</span>.qdc
               </button>
-              <button
-                type="button"
-                class="cattool"
-                onclick={() => catImport?.click()}
-                title="Import frame devices from .json or .qdc"
-              >
-                <span class="material-symbols-rounded" aria-hidden="true">file_upload</span>Import
+              <button type="button" class="cattool danger" onclick={askRemoveCatalog} title="Discard the local catalog">
+                Remove catalog
               </button>
-              <input
-                type="file"
-                accept=".json,.qdc"
-                class="catfile"
-                bind:this={catImport}
-                onchange={(e) => void importCat(e)}
-              />
-            </div>
-          {/if}
-          {#if editCat && draft}
-            <div class="catbar">
-              <button type="button" class="catfinish" onclick={saveCat} disabled={catBusy}>
-                {catBusy ? "Saving…" : "Save catalog"}
-              </button>
-              <button type="button" class="catcancel" onclick={cancelCat}>Cancel</button>
-              <button type="button" class="cattool" onclick={() => draftAdd(null)} title="Add a top-level device">
-                <span class="material-symbols-rounded" aria-hidden="true">add</span>New device
-              </button>
-              {#if localCatalog !== null}
-                <button type="button" class="catcancel" onclick={resetCat} title="Discard the local catalog"
-                  >Remove catalog</button
-                >
-              {/if}
-              {#if catMsg}<span class="msg err">{catMsg}</span>{/if}
-            </div>
-          {/if}
+            {/if}
+          </div>
         </div>
         {#if catIoMsg}<p class="catio">{catIoMsg}</p>{/if}
-        {#if editCat && draft}
-          <CatalogTree
-            catalog={draftView}
-            selected={armed}
-            {styleFor}
-            {onhover}
-            editing
-            onrename={draftRename}
-            ontag={draftTag}
-            onmove={draftMove}
-            onadd={draftAdd}
-            onaddbelow={draftAddBelow}
-            ondelete={askDeleteDevice}
-          />
-        {:else}
-          <CatalogTree
-            {catalog}
-            selected={armed}
-            {styleFor}
-            {onpick}
-            {onhover}
-            onadd={addStoredChild}
-            onaddbelow={addStoredBelow}
-            ondelete={askRemoveDevice}
-          />
-        {/if}
+        <CatalogTree
+          {catalog}
+          selected={armed}
+          {styleFor}
+          {onpick}
+          {onhover}
+          onedit={storeEdit}
+          onmove={storeMove}
+          onadd={addStoredChild}
+          onaddbelow={addStoredBelow}
+          ondelete={askRemoveDevice}
+        />
       </div>
     </ScrollArea.Viewport>
     <ScrollArea.Scrollbar class="wsbar" orientation="vertical">
@@ -383,48 +299,15 @@
     min-height: 0;
   }
 
-  .editcat {
-    font: inherit;
-    font-size: 0.7rem;
-    color: var(--on-surface-variant, #666);
-    background: var(--surface-variant, #eee);
-    border: none;
-    border-radius: 999px;
-    padding: 0.1rem 0.6rem;
-    margin-left: 0.4rem;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-
-    .material-symbols-rounded {
-      font-size: 0.95rem;
-    }
-
-    &:hover {
-      filter: brightness(1.1);
-    }
-  }
-
-  /* devices-codes header row: add buttons left, Edit pushed to the right */
+  /* tools row: New code + Import always; export + remove catalog when a catalog exists */
   .cathead {
     display: flex;
     align-items: center;
     gap: 0.4rem;
     flex-wrap: wrap;
     margin-bottom: 0.3rem;
-
-    .editcat {
-      margin-left: auto;
-    }
   }
 
-  .cattools {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
   .cattool {
     font: inherit;
     font-size: 0.72rem;
@@ -445,6 +328,11 @@
     &:hover {
       filter: brightness(1.1);
     }
+
+    &.danger:hover {
+      color: #b3261e;
+      border-color: #b3261e;
+    }
   }
   .catfile {
     display: none;
@@ -453,36 +341,6 @@
     font-size: 0.75rem;
     color: var(--on-surface-variant, #666);
     margin: 0.3rem 0 0;
-  }
-
-  .catbar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 0.3rem 0 0.1rem;
-    flex-wrap: wrap;
-
-    .catfinish {
-      font: inherit;
-      font-size: 0.8rem;
-      padding: 0.2rem 0.8rem;
-      border-radius: 999px;
-      border: 1px solid var(--primary, #6750a4);
-      background: var(--primary, #6750a4);
-      color: var(--on-primary, white);
-      cursor: pointer;
-    }
-
-    .catcancel {
-      font: inherit;
-      font-size: 0.75rem;
-      padding: 0.1rem 0.6rem;
-      border-radius: 999px;
-      border: 1px solid var(--outline, #888);
-      background: var(--surface, white);
-      color: var(--on-surface-variant, #666);
-      cursor: pointer;
-    }
   }
 
   @media (max-width: 50rem) {

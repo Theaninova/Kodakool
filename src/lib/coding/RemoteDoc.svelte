@@ -15,6 +15,8 @@
   import { buildPalette, onForFill } from "$lib/coding/palette";
   import { useColors } from "$lib/coding/prefs.svelte";
   import AnalysisPanel from "$lib/coding/AnalysisPanel.svelte";
+  import BackupDialog from "$lib/coding/BackupDialog.svelte";
+  import { BackupPrefs } from "$lib/coding/backup.svelte";
   import CatalogAside from "$lib/coding/CatalogAside.svelte";
   import ColorsDialog from "$lib/coding/ColorsDialog.svelte";
   import ConfirmHost from "$lib/coding/ConfirmHost.svelte";
@@ -41,6 +43,8 @@
   import type { ArticleSummary, ArticleVersion } from "$lib/coding/doc";
   import { watchArticlesLocal, watchLocalCatalog, watchProjectsLocal } from "$lib/local/local-api";
   import { onLocalMutated } from "$lib/local/worker-client";
+  import { scopeToProject, type StoreBlob } from "$lib/client/blob";
+  import { downloadText } from "$lib/client/download";
   import {
     codingMarks,
     smartSelect,
@@ -612,6 +616,34 @@
     livePos.set(entryId(key, entry), { from, to });
     writeEntry(entry);
     if (fromEditor && view) view.dispatch({ selection: { anchor: to } });
+    maybeAutoBackup();
+  }
+
+  /**
+   * Auto backup: every `backup.every` (0 = disabled) newly coded entries the page
+   * downloads a JSON backup of the open project — account-aware, both stores answer
+   * /api/export, and scopeToProject narrows it to the current project.
+   */
+  const backup = new BackupPrefs();
+  function maybeAutoBackup(): void {
+    const every = backup.every;
+    if (every <= 0) return;
+    if (backup.bump(data.folder) < every) return;
+    backup.reset(data.folder);
+    void downloadProjectBackup();
+  }
+  async function downloadProjectBackup(): Promise<void> {
+    if (api === null) return;
+    try {
+      const dump = scopeToProject((await api.exportDb(token)) as StoreBlob, data.folder);
+      downloadText(
+        `kodakool-${data.folder}-${new Date().toISOString().slice(0, 10)}.json`,
+        JSON.stringify(dump, null, 2),
+        "application/json",
+      );
+    } catch (e) {
+      barMsg = `auto backup: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
 
   function setPopupNote(value: string): void {
@@ -1294,6 +1326,7 @@
                 <Dialog.Trigger class="pill">
                   <span class="material-symbols-rounded" aria-hidden="true">palette</span>Colors
                 </Dialog.Trigger>
+                <BackupDialog prefs={backup} />
                 <HistoryPanel
                   count={versions.length}
                   {versions}

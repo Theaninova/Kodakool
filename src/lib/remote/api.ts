@@ -146,6 +146,14 @@ export class RemoteApi {
     return this.call("/api/projects", remoteProjectSchema, { method: "POST", body: { name }, token });
   }
 
+  renameProject(token: string, projectId: string, name: string): Promise<RemoteProject> {
+    return this.call(`/api/projects/${encodeURIComponent(projectId)}`, remoteProjectSchema, {
+      method: "PUT",
+      body: { name },
+      token,
+    });
+  }
+
   deleteProject(token: string, projectId: string): Promise<void> {
     return this.call(`/api/projects/${encodeURIComponent(projectId)}`, z.never(), { method: "DELETE", token });
   }

@@ -108,11 +108,9 @@ function treeCount(name: string): string | null {
   return row?.querySelector(".tcount")?.textContent ?? null;
 }
 
-/** edit-mode row addressed by the value of one of its inputs */
-function editRow(value: string): HTMLElement | undefined {
-  return [...document.querySelectorAll<HTMLElement>(".tnode")].find((r) =>
-    [...r.querySelectorAll("input")].some((i) => (i as HTMLInputElement).value === value),
-  );
+/** the catalog tree row element of `name` (drag grips, right-click targets) */
+function catRow(name: string): HTMLElement | undefined {
+  return [...document.querySelectorAll<HTMLElement>(".tnode")].find((r) => r.textContent?.includes(name));
 }
 
 /**
@@ -866,87 +864,66 @@ describe("article coding page", () => {
     expect([input.selectionStart, input.selectionEnd]).toEqual([0, "Untitled 3.md".length]);
   });
 
-  it("edits the frame-device catalog locally: rename, tag override, drag reorder", async () => {
+  it("edits the frame-device catalog straight on the store: rename, tag override, drag reorder", async () => {
     await seedArticle({ project: FOLDER, name: NAME, text: TEXT, entries: [quoteEntry] });
 
     renderArticle();
     await ready();
 
-    await page.getByRole("button", { name: "Edit devices" }).click();
+    // row menu Rename opens the row's inline editor; Enter commits name + tag directly
+    await rightClickRow("Zitat");
+    await page.getByRole("menuitem", { name: "Rename" }).click();
     await page.getByRole("textbox", { name: "name Zitat" }).fill("Markierung");
-    await page.getByRole("textbox", { name: "tag Kommentar" }).fill("KOM");
+    await page.getByRole("textbox", { name: "tag Zitat" }).fill("K2");
+    await userEvent.keyboard("{Enter}");
+    await expect.poll(async () => (await getLocalCatalog(FOLDER))?.devices[0].children[0]?.name).toBe("Markierung");
+    expect((await getLocalCatalog(FOLDER))?.devices[0].children[0]?.tag).toBe("K2");
+    // the override shows as the row tag after the tree reloads
+    await expect.element(page.getByText("K2").first()).toBeInTheDocument();
 
-    // drag Kommentar onto Rahmen (top-level reorder)
-    editRow("Kommentar")?.querySelector(".grip")?.dispatchEvent(new Event("dragstart"));
-    editRow("Rahmen")?.dispatchEvent(new Event("dragover", { cancelable: true }));
-    editRow("Rahmen")?.dispatchEvent(new Event("drop", { cancelable: true }));
-
-    await page.getByRole("button", { name: "Save catalog" }).click();
+    // drag Kommentar onto Rahmen (top-level reorder) — the grip rides the row's end
+    await expect.poll(() => catRow("Kommentar")?.querySelector(".grip") !== null).toBe(true);
+    catRow("Kommentar")?.querySelector(".grip")?.dispatchEvent(new Event("dragstart"));
+    catRow("Rahmen")?.dispatchEvent(new Event("dragover", { cancelable: true }));
+    catRow("Rahmen")?.dispatchEvent(new Event("drop", { cancelable: true }));
 
     await expect
       .poll(async () => (await getLocalCatalog(FOLDER))?.devices.map((d) => d.name))
       .toEqual(["Kommentar", "Rahmen"]);
-    const local = await getLocalCatalog(FOLDER);
-    expect(local?.devices[0].tag).toBe("KOM");
-    expect(local?.devices[1].children[0]?.name).toBe("Markierung");
-    // the override shows as the row tag after the tree reloads
-    await expect.element(page.getByText("KOM").first()).toBeInTheDocument();
   });
 
-  it("adds and deletes frame devices in catalog edit mode", async () => {
+  it("adds and deletes codes straight from the header and row menus", async () => {
     await seedArticle({ project: FOLDER, name: NAME, text: TEXT, entries: [quoteEntry] });
 
     renderArticle();
     await ready();
 
-    await page.getByRole("button", { name: "Edit devices" }).click();
-    await page.getByRole("button", { name: "New device" }).click();
+    // "New code" with nothing armed lands a fresh top-level code in the stored catalog
+    await page.getByRole("button", { name: "New code" }).click();
+    await expect
+      .poll(async () => (await getLocalCatalog(FOLDER))?.devices.map((d) => d.name))
+      .toEqual(["Rahmen", "Kommentar", "New device"]);
 
-    // the new top-level device arrives with an editable name row
-    await expect.element(page.getByRole("textbox", { name: "name New device" })).toBeInTheDocument();
+    // name it through its row menu
+    await rightClickRow("New device");
+    await page.getByRole("menuitem", { name: "Rename" }).click();
     await page.getByRole("textbox", { name: "name New device" }).fill("Extra");
+    await userEvent.keyboard("{Enter}");
+    await expect
+      .poll(async () => (await getLocalCatalog(FOLDER))?.devices.map((d) => d.name))
+      .toEqual(["Rahmen", "Kommentar", "Extra"]);
 
     // the row's context menu carries the delete action; it goes through the countdown
-    // confirmation (edit-mode rows carry their name in an input → address them via `editRow`)
-    const delRow = () => editRow("Kommentar");
-    await expect.poll(delRow).toBeTruthy();
-    const dr = delRow()!.getBoundingClientRect();
-    delRow()!.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: Math.round(dr.left + 10),
-        clientY: Math.round(dr.top + dr.height / 2),
-      }),
-    );
+    await rightClickRow("Kommentar");
     await page.getByRole("menuitem", { name: "Delete" }).click();
     await expect.element(page.getByRole("dialog", { name: 'Delete device "Kommentar"?' })).toBeInTheDocument();
     await expect
       .poll(() => (document.querySelector(".cfconfirm") as HTMLButtonElement | null)?.disabled, { timeout: 6000 })
       .toBe(false);
     await page.getByRole("button", { name: "Confirm" }).click();
-    await expect.poll(delRow).toBeUndefined();
-
-    await page.getByRole("button", { name: "Save catalog" }).click();
     await expect
       .poll(async () => (await getLocalCatalog(FOLDER))?.devices.map((d) => d.name))
       .toEqual(["Rahmen", "Extra"]);
-  });
-
-  it("starts catalog editing from the header add buttons", async () => {
-    await seedArticle({ project: FOLDER, name: NAME, text: TEXT });
-
-    renderArticle();
-    await ready();
-
-    // "New category" enters edit mode with a fresh top-level device
-    await page.getByRole("button", { name: "New category" }).click();
-    await expect.element(page.getByRole("button", { name: "Save catalog" })).toBeInTheDocument();
-    await page.getByRole("button", { name: "Save catalog" }).click();
-    await expect
-      .poll(async () => (await getLocalCatalog(FOLDER))?.devices.map((d) => d.name))
-      .toEqual(["Rahmen", "Kommentar", "New device"]);
   });
 
   it("shows the markdown cheatsheet in edit mode of .md documents only", async () => {
@@ -1049,12 +1026,12 @@ describe("article coding page", () => {
 
     await trigger.click();
     await expect.element(page.getByRole("listbox")).toBeInTheDocument();
-    // every OTHER project is offered (registered folders + projects holding documents) and
-    // the open one is not: the chip itself is the current project
+    // every project is offered (registered folders + projects holding documents), the
+    // open one FIRST (its row carries the rename + delete pills) and "New project" last
     const list = await page.getByRole("listbox").element();
     await expect
       .poll(() => [...list.querySelectorAll("[data-value]")].map((el) => el.getAttribute("data-value")))
-      .toEqual(["local:archive", "local:other", "__new__"]);
+      .toEqual([`local:${FOLDER}`, "local:archive", "local:other", "__new__"]);
 
     await page.getByRole("option", { name: "other" }).click();
     // switching opens the target project's FIRST document
@@ -1148,6 +1125,8 @@ describe("article coding page", () => {
     await expect.element(menu).toBeInTheDocument();
     await expect.element(menu.getByRole("menuitem", { name: `New document in ${FOLDER}` })).toBeInTheDocument();
     await expect.element(menu.getByRole("menuitem", { name: "Export .qdc" })).toBeInTheDocument();
+    await expect.element(menu.getByRole("menuitem", { name: "Export XLSX" })).toBeInTheDocument();
+    await expect.element(menu.getByRole("menuitem", { name: "Export PDF" })).toBeInTheDocument();
     await expect.element(menu.getByRole("menuitem", { name: "Delete project" })).toBeInTheDocument();
   });
 
@@ -1170,6 +1149,85 @@ describe("article coding page", () => {
     expect(await getArticle("other", "foreign doc")).not.toBeNull();
     // the open project is gone: the root reopens a surviving document
     expect(navigated).toEqual(["/"]);
+  });
+
+  it("renames the open project from the header's rename pill", async () => {
+    await seedArticle({ project: FOLDER, name: NAME, text: TEXT });
+
+    renderArticle();
+    await ready();
+
+    await page.getByRole("button", { name: "Rename project", exact: true }).click();
+    const input = page.getByLabelText(`New name for project ${FOLDER}`);
+    await expect.element(input).toBeInTheDocument();
+    await input.fill("renamed");
+    await userEvent.keyboard("{Enter}");
+
+    await expect.poll(async () => (await getArticle("renamed", NAME))?.text).toBe(TEXT);
+    expect(await getArticle(FOLDER, NAME)).toBeNull();
+    // renaming the open project follows the document to its new URL
+    expect(navigated[navigated.length - 1] ?? "").toContain("/text/renamed/");
+  });
+
+  it("deletes the open project from the header's delete pill", async () => {
+    await seedArticle({ project: FOLDER, name: NAME, text: TEXT });
+
+    renderArticle();
+    await ready();
+
+    await page.getByRole("button", { name: "Delete project", exact: true }).click();
+    await expect.element(page.getByRole("dialog", { name: `Delete project ${FOLDER}/?` })).toBeInTheDocument();
+    await expect
+      .poll(() => (document.querySelector(".cfconfirm") as HTMLButtonElement | null)?.disabled, { timeout: 6000 })
+      .toBe(false);
+    await page.getByRole("button", { name: "Confirm" }).click();
+
+    await expect.poll(async () => await getArticle(FOLDER, NAME)).toBeNull();
+    expect(navigated).toEqual(["/"]);
+  });
+
+  it("renames another project from the switcher dropdown without navigating", async () => {
+    await seedArticle({ project: FOLDER, name: NAME, text: TEXT });
+    await seedArticle({ project: "other", name: "foreign doc", text: "x" });
+
+    renderArticle();
+    await ready();
+
+    await page.getByRole("button", { name: "Switch project" }).click();
+    const renamePill = page.getByRole("button", { name: "Rename project other" });
+    await expect.element(renamePill).toBeInTheDocument();
+    await renamePill.click();
+
+    const input = page.getByLabelText("New name for project other");
+    await expect.element(input).toBeInTheDocument();
+    await input.fill("renamed");
+    await userEvent.keyboard("{Enter}");
+
+    await expect.poll(async () => await getArticle("renamed", "foreign doc")).not.toBeNull();
+    expect(await getArticle("other", "foreign doc")).toBeNull();
+    // the other project is not the open one: no navigation
+    expect(navigated).toEqual([]);
+  });
+
+  it("deletes another project from the switcher dropdown", async () => {
+    await seedArticle({ project: FOLDER, name: NAME, text: TEXT });
+    await seedArticle({ project: "other", name: "foreign doc", text: "x" });
+
+    renderArticle();
+    await ready();
+
+    await page.getByRole("button", { name: "Switch project" }).click();
+    await page.getByRole("button", { name: "Delete project other" }).click();
+    await expect.element(page.getByRole("dialog", { name: "Delete project other/?" })).toBeInTheDocument();
+    await expect
+      .poll(() => (document.querySelector(".cfconfirm") as HTMLButtonElement | null)?.disabled, { timeout: 6000 })
+      .toBe(false);
+    await page.getByRole("button", { name: "Confirm" }).click();
+
+    await expect.poll(async () => await getArticle("other", "foreign doc")).toBeNull();
+    // the open project survives, no navigation
+    expect(await getArticle(FOLDER, NAME)).not.toBeNull();
+    expect(navigated).toEqual([]);
   });
 
   it("exports and re-imports the project from the sidebar row", async () => {

@@ -1,4 +1,4 @@
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import CatalogTree from "./CatalogTree.svelte";
@@ -143,19 +143,41 @@ describe("CatalogTree.svelte", () => {
     expect(onpick).not.toHaveBeenCalled();
   });
 
-  it("edit mode renders name/tag inputs and disables picking", async () => {
+  it("renames a row inline through its context menu and commits name + tag", async () => {
+    const onedit = vi.fn();
     const onpick = vi.fn();
-    const onrename = vi.fn();
-    const ontag = vi.fn();
-    render(CatalogTree, { catalog: catalog(), editing: true, onpick, onrename, ontag });
+    render(CatalogTree, { catalog: catalog(), onedit, onpick });
 
-    await item("Zitat").click();
+    // the row's context menu carries Rename (right-click the row itself)
+    await expect.poll(itemCount).toBe(3);
+    const row = [...document.querySelectorAll<HTMLElement>(".tnode")].find((r) => r.textContent?.includes("Zitat"))!;
+    const r = row.getBoundingClientRect();
+    row.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: Math.round(r.left + 10),
+        clientY: Math.round(r.top + r.height / 2),
+      }),
+    );
+    await page.getByRole("menuitem", { name: "Rename" }).click();
+
+    // the open editor commits BOTH inputs on Enter; the row click armed nothing
+    const name = page.getByRole("textbox", { name: "name Zitat" });
+    await name.fill("Markierung");
+    await page.getByRole("textbox", { name: "tag Zitat" }).fill("K2");
+    await userEvent.keyboard("{Enter}");
+    expect(onedit).toHaveBeenCalledWith(CHILD_ID, { name: "Markierung", tag: "K2" });
     expect(onpick).not.toHaveBeenCalled();
+  });
 
-    await page.getByRole("textbox", { name: "name Zitat" }).fill("Markierung");
-    expect(onrename).toHaveBeenCalledWith(CHILD_ID, "Markierung");
-
-    await page.getByRole("textbox", { name: "tag Kommentar" }).fill("K2");
-    expect(ontag).toHaveBeenCalledWith(PLAIN_ID, "K2");
+  it("keeps a plain row click as the pick gesture", async () => {
+    const onedit = vi.fn();
+    const onpick = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onedit, onpick });
+    await item("Zitat").click();
+    expect(onpick).toHaveBeenCalledWith(CHILD_ID);
+    expect(onedit).not.toHaveBeenCalled();
   });
 });

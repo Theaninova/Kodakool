@@ -168,6 +168,94 @@ export function runApiSuite(newDb: () => Db | Promise<Db>): void {
       expect(list.docs[0].name).toBe("a.txt");
     });
 
+    it("renames projects: id survives, owner only, names stay unique per owner", async () => {
+      const h = await app();
+      const tok = await register(h, "rn@b.de");
+      const owner2 = await register(h, "rn2@b.de");
+      const proj = (await (
+        await h.request("/api/projects", {
+          method: "POST",
+          headers: json(tok),
+          body: JSON.stringify({ name: "Kodieren" }),
+        })
+      ).json()) as any;
+      const other = (await (
+        await h.request("/api/projects", {
+          method: "POST",
+          headers: json(owner2),
+          body: JSON.stringify({ name: "taken" }),
+        })
+      ).json()) as any;
+
+      const renamed = (await (
+        await h.request(`/api/projects/${proj.id}`, {
+          method: "PUT",
+          headers: json(tok),
+          body: JSON.stringify({ name: "Kodieren1" }),
+        })
+      ).json()) as any;
+      expect(renamed).toMatchObject({ id: proj.id, name: "Kodieren1", role: "owner" });
+      const listed = (await (await h.request("/api/projects", { headers: json(tok) })).json()) as any;
+      expect(listed.projects.map((p: any) => p.name)).toEqual(["Kodieren1"]);
+
+      // same-owner collision + empty name
+      const clash = await h.request(`/api/projects/${proj.id}`, {
+        method: "PUT",
+        headers: json(tok),
+        body: JSON.stringify({ name: "Kodieren1" }),
+      });
+      // renaming onto itself is fine
+      expect(clash.status).toBe(200);
+      await h.request("/api/projects", { method: "POST", headers: json(tok), body: JSON.stringify({ name: "dup" }) });
+      const onto = await h.request(`/api/projects/${proj.id}`, {
+        method: "PUT",
+        headers: json(tok),
+        body: JSON.stringify({ name: "dup" }),
+      });
+      expect(onto.status).toBe(409);
+      expect(((await onto.json()) as any).error).toContain("dup");
+      const empty = await h.request(`/api/projects/${proj.id}`, {
+        method: "PUT",
+        headers: json(tok),
+        body: JSON.stringify({ name: "  " }),
+      });
+      expect(empty.status).toBe(400);
+
+      // a different owner renaming their own project onto "Kodieren1" is allowed (per-owner uniqueness)
+      const cross = await h.request(`/api/projects/${other.id}`, {
+        method: "PUT",
+        headers: json(owner2),
+        body: JSON.stringify({ name: "Kodieren1" }),
+      });
+      expect(cross.status).toBe(200);
+
+      const stranger = await register(h, "rnx@b.de");
+      expect(
+        (
+          await h.request(`/api/projects/${proj.id}`, {
+            method: "PUT",
+            headers: json(stranger),
+            body: JSON.stringify({ name: "hijack" }),
+          })
+        ).status,
+      ).toBe(404);
+      const member = await register(h, "rnmember@b.de");
+      await h.request(`/api/projects/${proj.id}/share`, {
+        method: "POST",
+        headers: json(tok),
+        body: JSON.stringify({ email: "rnmember@b.de" }),
+      });
+      expect(
+        (
+          await h.request(`/api/projects/${proj.id}`, {
+            method: "PUT",
+            headers: json(member),
+            body: JSON.stringify({ name: "hijack" }),
+          })
+        ).status,
+      ).toBe(403);
+    });
+
     it("shares projects: member reads, non-members get 404", async () => {
       const h = await app();
       const owner = await register(h, "owner@b.de");

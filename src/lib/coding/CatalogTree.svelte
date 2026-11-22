@@ -19,12 +19,15 @@
     styleFor = () => "",
     onpick,
     onhover,
-    editing = false,
-    onrename,
-    ontag,
+    /** inline-rename commit: writes the name and/or the tag override of one device */
+    onedit,
+    /** drop `dragId` onto `targetId` (reorders within the target's sibling list, or nests it under the target) */
     onmove,
+    /** add a child device under `id` */
     onadd,
+    /** add a sibling device directly below `id` */
     onaddbelow,
+    /** request deletion of the device `id` (parent confirms) */
     ondelete,
   }: {
     catalog: CatalogView[];
@@ -34,27 +37,23 @@
     selected?: string | null;
     /** css custom properties applied to each node row (e.g. --marker, --fill) */
     styleFor?: (node: CatalogView) => string;
-    /** called with the device id when a pickable leaf row is clicked */
+    /** called with the device id when a row is clicked */
     onpick?: (id: string) => void;
     onhover?: (id: string | null) => void;
-    /** inline editing: name/tag inputs + drag reordering (picks disabled) */
-    editing?: boolean;
-    onrename?: (id: string, name: string) => void;
-    /** empty tag string clears the override (auto slug returns) */
-    ontag?: (id: string, tag: string) => void;
-    /** drop `dragId` onto `targetId` (reorders within the target's sibling list, or nests it under the target) */
+    onedit?: (id: string, patch: { name?: string; tag?: string }) => void;
     onmove?: (dragId: string, targetId: string) => void;
-    /** add a child device under `id` (edit mode) */
     onadd?: (id: string) => void;
-    /** add a sibling device directly below `id` (edit mode) */
     onaddbelow?: (id: string) => void;
-    /** request deletion of the device `id` (edit mode; parent confirms) */
     ondelete?: (id: string) => void;
   } = $props();
 
-  /** row currently being dragged / currently a drop target (edit mode only) */
+  /** row currently being dragged / currently a drop target */
   let dragId = $state<string | null>(null);
   let dropId = $state<string | null>(null);
+  /** the row whose rename input is open + the buffered tag + name until commit */
+  let renamingId = $state<string | null>(null);
+  let renameTag = $state("");
+  let renameName = $state("");
 
   function expandableIds(ns: CatalogView[], acc: string[] = []): string[] {
     for (const n of ns) {
@@ -97,25 +96,47 @@
     return out;
   }
 
+  /** the row menu's Rename: open the inline editor, pre-filled with the current tag + name */
+  function startRename(n: TreeNode): void {
+    renamingId = n.item.id;
+    renameTag = n.item.tag ?? "";
+    renameName = n.item.name;
+  }
+  /** Enter/blur: one commit for both inputs; an empty name keeps the old one */
+  function commitRename(n: TreeNode): void {
+    const id = renamingId;
+    if (id === null) return;
+    renamingId = null;
+    const patch: { name?: string; tag?: string } = {};
+    const name = renameName.trim();
+    if (name !== "" && name !== n.item.name) patch.name = name;
+    const tag = renameTag.trim();
+    if (tag !== (n.item.tag ?? "")) patch.tag = tag;
+    if (Object.keys(patch).length > 0) onedit?.(id, patch);
+  }
+
   function click(n: TreeNode): void {
-    // every catalog row is codeable — parents included; folding is the caret's alone
-    if (editing) return;
+    // every catalog row is a code — parents included; folding is the caret's alone
+    if (renamingId === n.item.id) return;
     if (UUID_RE.test(n.item.id)) onpick?.(n.item.id);
   }
 </script>
 
 {#snippet nodes(children: TreeNode[])}
   {#each children as n (n.id)}
-    {@const droppable = editing && dragId !== null && dragId !== n.item.id}
+    {@const droppable = onmove !== undefined && dragId !== null && dragId !== n.item.id}
     <!-- keyed wrapper: animate:flip needs the animated element to be the each block's only child -->
     <div class="titem" animate:flip={{ duration: 180 }}>
       <RowMenu
         items={[
-          ...(editing || !UUID_RE.test(n.item.id)
+          ...(!UUID_RE.test(n.item.id)
             ? []
             : [{ label: "Code with this device", icon: "edit_note", onSelect: () => onpick?.(n.item.id) }]),
           ...(onadd ? [{ label: "New child code", icon: "tab_new_right", onSelect: () => onadd(n.item.id) }] : []),
           ...(onaddbelow ? [{ label: "New below", icon: "add_row_below", onSelect: () => onaddbelow(n.item.id) }] : []),
+          ...(onedit && UUID_RE.test(n.item.id)
+            ? [{ label: "Rename", icon: "edit", onSelect: () => startRename(n) }]
+            : []),
           ...(ondelete
             ? [{ label: "Delete", icon: "delete", danger: true, sep: true, onSelect: () => ondelete(n.item.id) }]
             : []),
@@ -126,13 +147,12 @@
           <div
             {...n.attrs}
             class="tnode"
-            class:edit={editing}
+            class:renaming={renamingId === n.item.id}
             class:group={n.canExpand}
             class:unused={countOf(n) === 0}
             class:sel={selected === n.item.id}
             class:drop={droppable && dropId === n.item.id}
             class:dragging={dragId === n.item.id}
-            data-kind={n.item.kind}
             style={`${styleFor(n.item)};pointer-events:auto`}
             onmouseenter={() => onhover?.(n.item.id)}
             onmouseleave={() => onhover?.(null)}
@@ -156,11 +176,80 @@
             }}
             {...rest}
           >
-            {#if editing}
+            <span
+              class="caret material-symbols-rounded"
+              class:hidden={!n.canExpand}
+              class:open={n.expanded}
+              aria-hidden="true"
+              title={n.canExpand ? (n.expanded ? "Collapse" : "Expand") : undefined}
+              onclick={(e) => {
+                if (n.canExpand) {
+                  e.stopPropagation();
+                  n.toggleExpand();
+                }
+              }}>{n.canExpand ? "chevron_right" : ""}</span
+            >
+            {#if renamingId === n.item.id}
+              <input
+                class="ttag"
+                value={renameTag}
+                placeholder={n.item.slug?.short ?? "tag"}
+                maxlength={12}
+                spellcheck="false"
+                title={n.item.code}
+                aria-label={`Tag ${n.item.name || n.item.code}`}
+                oninput={(e) => (renameTag = e.currentTarget.value)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.stopPropagation();
+                    commitRename(n);
+                  } else if (e.key === "Escape") {
+                    e.stopPropagation();
+                    renamingId = null;
+                  }
+                }}
+                onblur={(e) => {
+                  // moving focus to the row's other input keeps the editor open
+                  if ((e.relatedTarget as HTMLElement | null)?.closest(".tnode") === e.currentTarget.parentElement)
+                    return;
+                  commitRename(n);
+                }}
+              />
+              <input
+                class="tedit"
+                value={renameName}
+                placeholder="Name"
+                spellcheck="false"
+                aria-label={`Name ${n.item.name || n.item.code}`}
+                oninput={(e) => (renameName = e.currentTarget.value)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.stopPropagation();
+                    commitRename(n);
+                  } else if (e.key === "Escape") {
+                    e.stopPropagation();
+                    renamingId = null;
+                  }
+                }}
+                onblur={(e) => {
+                  if ((e.relatedTarget as HTMLElement | null)?.closest(".tnode") === e.currentTarget.parentElement)
+                    return;
+                  commitRename(n);
+                }}
+              />
+            {:else}
+              <span class="tnum" title={n.item.code}>{n.item.slug?.short ?? codeId(n.item.code)}</span>
+              <span class="tname"
+                >{#each boldSegments(n.item.name, n.item.slug) as seg, si (si)}{#if seg.b}<b>{seg.t}</b
+                    >{:else}{seg.t}{/if}{/each}</span
+              >
+            {/if}
+            <span class="tcount">{countOf(n) || ""}</span>
+            {#if onmove !== undefined}
               <span
                 class="grip material-symbols-rounded"
                 draggable="true"
-                title="Drag onto a row to reorder — drop on another category to move it in there"
+                title="Drag onto a row to reorder — dropping on another code moves it in there"
                 aria-hidden="true"
                 ondragstart={(e) => {
                   dragId = n.item.id;
@@ -175,63 +264,18 @@
                 drag_indicator</span
               >
             {/if}
-            <span
-              class="caret material-symbols-rounded"
-              class:hidden={!n.canExpand}
-              class:open={n.expanded}
-              aria-hidden="true"
-              title={n.canExpand ? (n.expanded ? "Collapse" : "Expand") : undefined}
-              onclick={(e) => {
-                if (n.canExpand) {
-                  e.stopPropagation();
-                  n.toggleExpand();
-                }
-              }}>{n.canExpand ? "chevron_right" : ""}</span
+            <button
+              type="button"
+              class="menubtn"
+              title="Code actions"
+              aria-label={`Menu for ${n.item.name || n.item.code}`}
+              onclick={(e) => openRowMenu(e.currentTarget.closest("[data-rowmenu]") ?? e.currentTarget)}
             >
-            {#if editing}
-              <input
-                class="ttag"
-                value={n.item.tag ?? ""}
-                placeholder={n.item.slug?.short ?? "tag"}
-                maxlength={12}
-                spellcheck="false"
-                title={n.item.code}
-                aria-label={`Tag ${n.item.name || n.item.code}`}
-                oninput={(e) => ontag?.(n.item.id, e.currentTarget.value)}
-                onkeydown={(e) => e.stopPropagation()}
-              />
-              <input
-                class="tedit"
-                value={n.item.name}
-                placeholder="Name"
-                spellcheck="false"
-                aria-label={`Name ${n.item.name || n.item.code}`}
-                oninput={(e) => onrename?.(n.item.id, e.currentTarget.value)}
-                onkeydown={(e) => e.stopPropagation()}
-              />
-            {:else}
-              <span class="tnum" title={n.item.code}>{n.item.slug?.short ?? codeId(n.item.code)}</span>
-              <span class="tname"
-                >{#each boldSegments(n.item.name, n.item.slug) as seg, si (si)}{#if seg.b}<b>{seg.t}</b
-                    >{:else}{seg.t}{/if}{/each}</span
-              >
-            {/if}
-            <span class="tcount">{countOf(n) || ""}</span>
+              <span class="material-symbols-rounded" aria-hidden="true">more_vert</span>
+            </button>
           </div>
         {/snippet}
       </RowMenu>
-      {#if editing}
-        <!-- edit mode: the row's add/delete actions live in this row's context menu -->
-        <button
-          type="button"
-          class="menubtn"
-          title="Device actions"
-          aria-label={`Menu for ${n.item.name || n.item.code}`}
-          onclick={(e) => openRowMenu(e.currentTarget.closest("[data-rowmenu]") ?? e.currentTarget)}
-        >
-          <span class="material-symbols-rounded" aria-hidden="true">more_vert</span>
-        </button>
-      {/if}
       {#if n.canExpand && n.expanded}
         <div {...tree.group} transition:slide={{ duration: 180 }}>
           {@render nodes(n.children ?? [])}
@@ -258,14 +302,6 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-  }
-  /* edit mode: keyboard/touch way into the row's context menu, overlaid on the row's right edge */
-  /* the shared .menubtn base lives in the layout's themeCss — only the
-     catalog row's absolute placement is added here */
-  .menubtn {
-    position: absolute;
-    top: -0.15rem;
-    right: 0.1rem;
   }
   .tnode {
     display: flex;
@@ -316,7 +352,7 @@
     text-align: center;
     font-size: 1.1rem;
     color: var(--on-surface-variant, #888);
-    /* every catalog row arms its device on click, so the caret is the fold control */
+    /* every catalog row arms its code on click, so the caret is the fold control */
     cursor: pointer;
     /* one glyph (chevron_right) for every expandable row: the rotation IS the
        fold/unfold motion — points right when folded, down when open */
@@ -350,7 +386,16 @@
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
-  /* sub-category groups keep their indent, no guide line — the marker colors of
+  /* the row's keyboard way into its context menu (the shared .menubtn base lives
+     in the layout's themeCss — rows render it inline at the right edge) */
+  .tnode .menubtn {
+    flex: none;
+    opacity: 0.55;
+  }
+  .tnode:hover .menubtn {
+    opacity: 1;
+  }
+  /* sub-code groups keep their indent, no guide line — the marker colors of
      each level carry the hierarchy */
   div[role="group"] {
     display: flex;
@@ -358,7 +403,7 @@
     padding-left: 1rem;
     margin-left: 0.4rem;
   }
-  /* edit mode: grip handle + inline name/tag inputs, hover no longer paints the row */
+  /* the drag handle rides the row's END, right after the count */
   .grip {
     width: 1rem;
     flex: none;
@@ -434,12 +479,12 @@
     color: inherit;
     opacity: 0.45;
   }
-  /* editing keeps the row's own fill — hover must not repaint it solid */
-  .tnode.edit:hover {
+  /* renaming keeps the row's own fill — hover must not repaint it solid */
+  .tnode.renaming:hover {
     background: var(--fill, transparent);
     color: var(--on-surface);
   }
-  :root[data-theme="dark"] .tnode.edit:hover {
+  :root[data-theme="dark"] .tnode.renaming:hover {
     background: var(--fill-d, transparent);
     color: var(--on-surface);
   }
