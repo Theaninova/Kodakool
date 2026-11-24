@@ -200,11 +200,12 @@
                 aria-label={`Tag ${n.item.name || n.item.code}`}
                 oninput={(e) => (renameTag = e.currentTarget.value)}
                 onkeydown={(e) => {
+                  // melt's tree eats letters as typeahead and preventDefaults Ctrl+letters
+                  // (Ctrl+A = select all nodes) — the rename inputs own their keys entirely
+                  e.stopPropagation();
                   if (e.key === "Enter") {
-                    e.stopPropagation();
                     commitRename(n);
                   } else if (e.key === "Escape") {
-                    e.stopPropagation();
                     renamingId = null;
                   }
                 }}
@@ -223,11 +224,12 @@
                 aria-label={`Name ${n.item.name || n.item.code}`}
                 oninput={(e) => (renameName = e.currentTarget.value)}
                 onkeydown={(e) => {
+                  // melt's tree eats letters as typeahead and preventDefaults Ctrl+letters
+                  // (Ctrl+A = select all nodes) — the rename inputs own their keys entirely
+                  e.stopPropagation();
                   if (e.key === "Enter") {
-                    e.stopPropagation();
                     commitRename(n);
                   } else if (e.key === "Escape") {
-                    e.stopPropagation();
                     renamingId = null;
                   }
                 }}

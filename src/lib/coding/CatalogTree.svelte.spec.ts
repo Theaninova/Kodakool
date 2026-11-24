@@ -31,6 +31,22 @@ function countText(name: string): string | null {
   return row?.querySelector(".tcount")?.textContent ?? null;
 }
 
+/** open a row's context menu and click Rename (the menu anchors at the pointer, so the dispatch needs coordinates) */
+async function openRename(name: string): Promise<void> {
+  const row = [...document.querySelectorAll<HTMLElement>(".tnode")].find((r) => r.textContent?.includes(name))!;
+  const r = row.getBoundingClientRect();
+  row.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: Math.round(r.left + 10),
+      clientY: Math.round(r.top + r.height / 2),
+    }),
+  );
+  await page.getByRole("menuitem", { name: "Rename" }).click();
+}
+
 describe("CatalogTree.svelte", () => {
   it("renders every node with its derived code and name", async () => {
     render(CatalogTree, { catalog: catalog() });
@@ -150,18 +166,7 @@ describe("CatalogTree.svelte", () => {
 
     // the row's context menu carries Rename (right-click the row itself)
     await expect.poll(itemCount).toBe(3);
-    const row = [...document.querySelectorAll<HTMLElement>(".tnode")].find((r) => r.textContent?.includes("Zitat"))!;
-    const r = row.getBoundingClientRect();
-    row.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: Math.round(r.left + 10),
-        clientY: Math.round(r.top + r.height / 2),
-      }),
-    );
-    await page.getByRole("menuitem", { name: "Rename" }).click();
+    await openRename("Zitat");
 
     // the open editor commits BOTH inputs on Enter; the row click armed nothing
     const name = page.getByRole("textbox", { name: "name Zitat" });
@@ -170,6 +175,35 @@ describe("CatalogTree.svelte", () => {
     await userEvent.keyboard("{Enter}");
     expect(onedit).toHaveBeenCalledWith(CHILD_ID, { name: "Markierung", tag: "K2" });
     expect(onpick).not.toHaveBeenCalled();
+  });
+
+  // issue #12: melt's tree eats keydowns that bubble from its rows — letters are swallowed
+  // as typeahead and Ctrl+letters are preventDefaulted (Ctrl+A is "select all nodes"),
+  // so the rename inputs could not be typed into, copied from or pasted into.
+  it("types letters and Ctrl+A into the rename inputs", async () => {
+    const onedit = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onedit });
+
+    await expect.poll(itemCount).toBe(3);
+    await openRename("Zitat");
+
+    const tag = page.getByRole("textbox", { name: "tag Zitat" });
+    await tag.click();
+    await userEvent.keyboard("Zitat");
+    await expect.element(tag).toHaveValue("Zitat");
+
+    const name = page.getByRole("textbox", { name: "name Zitat" });
+    await name.click();
+    await userEvent.keyboard("{Control>}{a}{/Control}");
+    await expect
+      .poll(() => {
+        const el = document.activeElement as HTMLInputElement | null;
+        return el?.selectionStart === 0 && el?.selectionEnd === el?.value.length && (el?.value.length ?? 0) > 0;
+      })
+      .toBe(true);
+
+    await userEvent.keyboard("Kommentar{Enter}");
+    expect(onedit).toHaveBeenCalledWith(CHILD_ID, { name: "Kommentar", tag: "Zitat" });
   });
 
   it("keeps a plain row click as the pick gesture", async () => {
