@@ -47,6 +47,60 @@ async function openRename(name: string): Promise<void> {
   await page.getByRole("menuitem", { name: "Rename" }).click();
 }
 
+/** the grip (dnd-kit drag handle) of the row containing `name` */
+function grip(name: string): HTMLElement {
+  return [...document.querySelectorAll<HTMLElement>(".tnode")]
+    .find((r) => r.textContent?.includes(name))!
+    .querySelector(".grip") as HTMLElement;
+}
+/** dnd-kit's pointer sensor listens on the handle + the document — plain bubbling PointerEvents drive it */
+function pev(target: Element, type: string, x: number, y: number): void {
+  target.dispatchEvent(
+    new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      buttons: 1,
+      clientX: Math.round(x),
+      clientY: Math.round(y),
+    }),
+  );
+}
+/** pointer coordinates in `zone` (of the row height) on the row containing `name` */
+function zonePoint(name: string, zone: "before" | "inside" | "after"): { x: number; y: number } {
+  const r = [...document.querySelectorAll<HTMLElement>(".tnode")]
+    .find((c) => c.textContent?.includes(name))!
+    .getBoundingClientRect();
+  return {
+    x: r.left + r.width / 3,
+    y: zone === "before" ? r.top + 2 : zone === "after" ? r.bottom - 2 : r.top + r.height / 2,
+  };
+}
+/**
+ * Drive a grip drag from the row `fromName` to a zone on the row `toName`,
+ * ending (or parking, when `hold` is set) with the pointer over the target.
+ */
+async function gripDrag(
+  fromName: string,
+  toName: string,
+  zone: "before" | "inside" | "after",
+  hold = false,
+): Promise<void> {
+  await expect.poll(() => grip(fromName) !== null).toBe(true);
+  const g = grip(fromName);
+  const gb = g.getBoundingClientRect();
+  const down = { x: gb.left + gb.width / 2, y: gb.top + gb.height / 2 };
+  pev(g, "pointerdown", down.x, down.y);
+  pev(g, "pointermove", down.x + 20, down.y + 12); // past the 4px activation distance
+  await new Promise((r) => setTimeout(r, 30)); // the sensor coalesces its moves in rAF
+  const p = zonePoint(toName, zone);
+  pev(g, "pointermove", p.x, p.y);
+  await new Promise((r) => setTimeout(r, 30));
+  if (!hold) pev(g, "pointerup", p.x, p.y);
+}
+
 describe("CatalogTree.svelte", () => {
   it("renders every node with its derived code and name", async () => {
     render(CatalogTree, { catalog: catalog() });
@@ -213,5 +267,69 @@ describe("CatalogTree.svelte", () => {
     await item("Zitat").click();
     expect(onpick).toHaveBeenCalledWith(CHILD_ID);
     expect(onedit).not.toHaveBeenCalled();
+  });
+
+  it("grip-drops a code onto a row's middle as its child", async () => {
+    const onmove = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onmove });
+    await expect.poll(itemCount).toBe(3);
+
+    await gripDrag("Kommentar", "Zitat", "inside");
+    expect(onmove).toHaveBeenCalledWith(PLAIN_ID, CHILD_ID, "inside");
+  });
+
+  it("grip-drops a code on a sibling row's edge to reorder beside it", async () => {
+    const onmove = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onmove });
+    await expect.poll(itemCount).toBe(3);
+
+    await gripDrag("Rahmen", "Kommentar", "before");
+    expect(onmove).toHaveBeenCalledWith(GROUP_ID, PLAIN_ID, "before");
+  });
+
+  it("paints the drop placement while dragging and clears it on release", async () => {
+    const onmove = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onmove });
+    await expect.poll(itemCount).toBe(3);
+
+    await gripDrag("Kommentar", "Zitat", "inside", true);
+    await expect.poll(() => !!document.querySelector(".tnode.dinside")).toBe(true);
+
+    const g = grip("Kommentar");
+    const p = zonePoint("Zitat", "inside");
+    pev(g, "pointerup", p.x, p.y);
+    await expect.poll(() => document.querySelector(".tnode.dinside")).toBe(null);
+    expect(onmove).toHaveBeenCalledWith(PLAIN_ID, CHILD_ID, "inside");
+  });
+
+  it("refuses to drop a code into its own subtree", async () => {
+    const onmove = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onmove });
+    await expect.poll(itemCount).toBe(3);
+
+    await gripDrag("Rahmen", "Zitat", "inside");
+    await new Promise((r) => setTimeout(r, 200)); // let a late dragend land
+    expect(onmove).not.toHaveBeenCalled();
+  });
+
+  it("auto-expands a collapsed code when a drag dwells inside it", async () => {
+    const onmove = vi.fn();
+    render(CatalogTree, { catalog: catalog(), onmove });
+    await expect.poll(itemCount).toBe(3);
+
+    // fold Rahmen under its own caret
+    const caret = [...document.querySelectorAll<HTMLElement>(".tnode")]
+      .find((r) => r.textContent?.includes("Rahmen"))!
+      .querySelector(".caret") as HTMLElement;
+    caret.click();
+    await expect.poll(itemCount).toBe(2);
+
+    await gripDrag("Kommentar", "Rahmen", "inside", true);
+    await expect.poll(itemCount).toBe(3); // the dwell opened the folded code
+
+    const g = grip("Kommentar");
+    const p = zonePoint("Rahmen", "inside");
+    pev(g, "pointerup", p.x, p.y);
+    expect(onmove).toHaveBeenCalledTimes(1); // and the drop still lands somewhere legal
   });
 });

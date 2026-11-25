@@ -881,11 +881,35 @@ describe("article coding page", () => {
     // the override shows as the row tag after the tree reloads
     await expect.element(page.getByText("K2").first()).toBeInTheDocument();
 
-    // drag Kommentar onto Rahmen (top-level reorder) — the grip rides the row's end
+    // dnd-kit grip drag (pointer sensor from the row's end grip, DragOverlay follows):
+    // dropping Kommentar onto Rahmen's top edge — the "before" zone — reorders the top level
     await expect.poll(() => catRow("Kommentar")?.querySelector(".grip") !== null).toBe(true);
-    catRow("Kommentar")?.querySelector(".grip")?.dispatchEvent(new Event("dragstart"));
-    catRow("Rahmen")?.dispatchEvent(new Event("dragover", { cancelable: true }));
-    catRow("Rahmen")?.dispatchEvent(new Event("drop", { cancelable: true }));
+    const grip = catRow("Kommentar")!.querySelector(".grip")!;
+    const gb = grip.getBoundingClientRect();
+    const rb = catRow("Rahmen")!.getBoundingClientRect();
+    const pev = (type: string, x: number, y: number) =>
+      grip.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: Math.round(x),
+          clientY: Math.round(y),
+        }),
+      );
+    const fromX = gb.left + gb.width / 2;
+    const fromY = gb.top + gb.height / 2;
+    const toX = rb.left + rb.width / 3;
+    const toY = rb.top + 2;
+    pev("pointerdown", fromX, fromY);
+    pev("pointermove", fromX + 20, fromY); // past the 4px activation distance
+    await new Promise((r) => setTimeout(r, 30)); // the sensor coalesces its moves in rAF
+    pev("pointermove", toX, toY);
+    await expect.poll(() => !!document.querySelector(".tnode.dbefore")).toBe(true);
+    pev("pointerup", toX, toY);
 
     await expect
       .poll(async () => (await getLocalCatalog(FOLDER))?.devices.map((d) => d.name))

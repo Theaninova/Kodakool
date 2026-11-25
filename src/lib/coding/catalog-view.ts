@@ -79,6 +79,42 @@ export function buildCatalogView(instr: Instructions | null, entryKeys: Iterable
   return nodes;
 }
 
+/**
+ * Structural view of a melt-Tree row node — the contract the row component
+ * needs, so the sidebar's internal tree-node class never crosses the boundary.
+ */
+export interface CatalogRowNode {
+  readonly attrs: Record<string, unknown>;
+  readonly item: CatalogView;
+  readonly expanded: boolean;
+  readonly canExpand: boolean;
+  toggleExpand: () => void;
+}
+
+/** Numeric display-code prefix of a possibly legacy label ("1.2 legacy" → "1.2"). */
+export function codeId(code: string): string {
+  return /^[0-9]+(?:\.[0-9]+)*/.exec(code)?.[0] ?? code;
+}
+
+/** The row name split into plain/bold segments for the short-label highlight. */
+export function boldSegments(name: string, slug: Slug | null): { t: string; b: boolean }[] {
+  if (!slug || slug.bold.length === 0) return name ? [{ t: name, b: false }] : [];
+  const out: { t: string; b: boolean }[] = [];
+  let i = 0;
+  for (const p of [...slug.bold].sort((a, b) => a.start - b.start)) {
+    if (p.start > i) out.push({ t: name.slice(i, p.start), b: false });
+    out.push({ t: name.slice(p.start, p.start + p.len), b: true });
+    i = p.start + p.len;
+  }
+  if (i < name.length) out.push({ t: name.slice(i, name.length), b: false });
+  return out;
+}
+
+/** True when a node with `id` lives below `nodes` — a dragged code may never land in its own subtree. */
+export function inSubtree(nodes: CatalogView[], id: string): boolean {
+  return nodes.some((n) => n.id === id || inSubtree(n.children, id));
+}
+
 /** Depth-first flatten: every node once, parents before children. */
 export function flattenCatalog(nodes: CatalogView[]): CatalogView[] {
   const flat: CatalogView[] = [];

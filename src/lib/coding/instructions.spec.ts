@@ -166,4 +166,27 @@ describe("device-tree editing operations", () => {
     expect(t.map((d) => d.id)).toEqual(["a", "b"]);
     expect(t[0].children.map((c) => c.id)).toEqual(["a1", "a2"]);
   });
+
+  it("moveDevice placements land beside or inside the target", () => {
+    // after → index+1 in the TARGET's sibling list, whatever direction it came from
+    const after = tree();
+    expect(moveDevice(after, "b", "a", "after")).toBe(true);
+    expect(after.map((d) => d.id)).toEqual(["a", "b"]);
+    const back = tree();
+    expect(moveDevice(back, "b", "a", "after")).toBe(true);
+    expect(moveDevice(back, "b", "a", "after")).toBe(true);
+    expect(back.map((d) => d.id)).toEqual(["a", "b"]);
+    // before → at the target's index; non-sibling target re-parents to the target's list
+    const before = tree();
+    expect(moveDevice(before, "a1", "b", "before")).toBe(true);
+    expect(before.map((d) => d.id)).toEqual(["a", "a1", "b"]);
+    expect(before[0].children.map((c) => c.id)).toEqual(["a2"]);
+    // inside → the target's last child
+    const inside = tree();
+    expect(moveDevice(inside, "b", "a", "inside")).toBe(true);
+    expect(inside.map((d) => d.id)).toEqual(["a"]);
+    expect(inside[0].children.map((c) => c.id)).toEqual(["a1", "a2", "b"]);
+    // a target inside the dragged subtree stays refused with an explicit placement
+    expect(moveDevice(inside, "a", "a1", "inside")).toBe(false);
+  });
 });

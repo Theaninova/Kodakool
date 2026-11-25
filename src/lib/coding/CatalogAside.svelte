@@ -12,6 +12,7 @@
     removeDeviceById,
     type FrameDevice,
     type Instructions,
+    type MovePlacement,
   } from "$lib/coding/instructions";
   import { parseCatalogFile } from "$lib/coding/import";
   import type { PaletteOptions } from "$lib/coding/palette";
@@ -96,11 +97,11 @@
     }
     void persist(copy, `Device "${d.name}" updated`, "save failed");
   }
-  /** grip drag: reorder/re-parent straight on the stored catalog */
-  function storeMove(dragId: string, targetId: string): void {
+  /** grip drag: land the device beside or inside the target row, straight on the stored catalog */
+  function storeMove(dragId: string, targetId: string, mode: MovePlacement): void {
     if (localCatalog === null) return;
     const copy = plainClone(localCatalog);
-    if (!moveDevice(copy.devices, dragId, targetId)) return;
+    if (!moveDevice(copy.devices, dragId, targetId, mode)) return;
     void persist(copy, "", "move failed");
   }
   /** header `New code`: under the armed code when one is armed, else top level

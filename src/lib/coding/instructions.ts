@@ -138,17 +138,42 @@ export function removeDeviceById(devices: FrameDevice[], id: string): FrameDevic
   return list.splice(i, 1)[0];
 }
 
+/** Where the dragged code lands on the target row: beside it as a sibling, or nested as its last child. */
+export type MovePlacement = "before" | "after" | "inside";
+
 /**
- * Drop `dragId` onto `targetId`: on a sibling it reorders within that sibling
+ * Drop `dragId` onto `targetId`. With an explicit `placement`, `before`/`after`
+ * insert the dragged device next to the target in the target's sibling list;
+ * `inside` appends it as the target's last child. Without one, the legacy
+ * drop-on-a-row heuristic stays: on a sibling it reorders within that sibling
  * list (downward moves land after the target, upward moves before it); onto any
  * other device it nests the dragged device as the target's last child. False
  * when either id is unknown or the target lies inside the dragged subtree.
  */
-export function moveDevice(devices: FrameDevice[], dragId: string, targetId: string): boolean {
+export function moveDevice(
+  devices: FrameDevice[],
+  dragId: string,
+  targetId: string,
+  placement?: MovePlacement,
+): boolean {
   if (dragId === targetId) return false;
   const list = siblingsOf(devices, dragId);
   if (!list) return false;
   const from = list.findIndex((d) => d.id === dragId);
+  if (placement) {
+    const target = findDevice(devices, targetId);
+    if (!target || findDevice(list[from].children, targetId)) return false;
+    const [dragged] = list.splice(from, 1);
+    if (placement === "inside") {
+      target.children.push(dragged);
+      return true;
+    }
+    const targetList = siblingsOf(devices, targetId) ?? [];
+    const at = targetList.findIndex((d) => d.id === targetId);
+    if (at < 0) return false;
+    targetList.splice(placement === "before" ? at : at + 1, 0, dragged);
+    return true;
+  }
   const to = list.findIndex((d) => d.id === targetId);
   if (to < 0) {
     const target = findDevice(devices, targetId);
